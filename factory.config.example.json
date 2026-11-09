@@ -1,5 +1,7 @@
 {
-  "repos": ["DEIN-GITHUB-NAME/dein-repo"],
+  "repos": [
+    "DEIN-GITHUB-NAME/dein-repo"
+  ],
   "label": "factory",
   "maxParallel": 2,
   "model": "opus",
@@ -7,5 +9,13 @@
   "pollSeconds": 60,
   "jobTimeoutMinutes": 90,
   "containerMemory": "3g",
-  "project": { "owner": "DEIN-GITHUB-NAME", "number": 1 }
+  "project": {
+    "owner": "DEIN-GITHUB-NAME",
+    "number": 1
+  },
+  "preview": {
+    "host": "AUTO",
+    "password": "AUTO",
+    "max": 3
+  }
 }

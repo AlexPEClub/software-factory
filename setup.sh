@@ -45,6 +45,15 @@ install -d -m 700 "$CONF_DIR"
 [ -f "$CONF_DIR/config.json" ] || { cp factory.config.example.json "$CONF_DIR/config.json"; echo "  Vorlage angelegt: $CONF_DIR/config.json (bitte anpassen)"; }
 [ -f "$CONF_DIR/secrets.env" ] || { touch "$CONF_DIR/secrets.env"; chmod 600 "$CONF_DIR/secrets.env"; }
 install -d /var/lib/software-factory/jobs
+# Vorschau: Server-IP und zufälliges Passwort eintragen, falls noch "AUTO"
+if jq -e '.preview.host == "AUTO" or .preview.password == "AUTO"' "$CONF_DIR/config.json" >/dev/null 2>&1; then
+  IP=$(curl -fsS4 https://ifconfig.me || hostname -I | awk '{print $1}')
+  PW=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)
+  TMP=$(mktemp)
+  jq --arg ip "$IP" --arg pw "$PW" '.preview.host = (if .preview.host == "AUTO" then $ip else .preview.host end) | .preview.password = (if .preview.password == "AUTO" then $pw else .preview.password end)' "$CONF_DIR/config.json" > "$TMP" && mv "$TMP" "$CONF_DIR/config.json" && chmod 600 "$CONF_DIR/config.json"
+  echo "  Vorschau: http://$IP:4001… · Login factory · Passwort in $CONF_DIR/config.json"
+fi
+docker pull -q caddy:2-alpine >/dev/null
 
 say "Job-Image bauen (dauert beim ersten Mal ein paar Minuten)"
 docker build -q -t software-factory-job:latest -f image/Dockerfile . >/dev/null

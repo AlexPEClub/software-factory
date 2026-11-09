@@ -18,6 +18,8 @@ type Config = {
   dataDir: string;
   containerMemory: string;
   project?: { owner: string; number: number };
+  /** Vorschau pro PR: http://<host>:<4000+slot>, mit Passwortschutz (Nutzer "factory") */
+  preview?: { host: string; password: string; max?: number; memory?: string };
 };
 
 type Comment = { author: { login: string }; body: string; createdAt: string };
@@ -238,6 +240,98 @@ async function finish(cfg: Config, c: Container) {
   await docker(["rm", "-f", c.name]).catch(() => {});
 }
 
+// ---------- Vorschau pro Pull Request (optional) ----------
+
+const CADDYFILE = "/etc/software-factory/Caddyfile";
+const PREVIEW_PORT = (slot: number) => 4000 + slot; // von außen erreichbar (mit Passwort)
+const INTERNAL_PORT = (slot: number) => 5000 + slot; // nur lokal, dahinter läuft die App
+let caddyHash: string | null = null;
+const previewNoticePosted = new Set<string>();
+
+type Preview = { name: string; repo: string; issue: number; sha: string; slot: number; running: boolean };
+
+async function listPreviews(): Promise<Preview[]> {
+  const names = (await docker(["ps", "-a", "--filter", "label=sf.preview=1", "--format", "{{.Names}}"])).split("\n").filter(Boolean);
+  const result: Preview[] = [];
+  for (const name of names) {
+    const info = JSON.parse(await docker(["inspect", name]))[0];
+    const l = info.Config.Labels;
+    result.push({ name, repo: l["sf.repo"], issue: Number(l["sf.issue"]), sha: l["sf.sha"], slot: Number(l["sf.slot"]), running: info.State.Running });
+  }
+  return result;
+}
+
+async function writeCaddy(cfg: Config, previews: Preview[]) {
+  if (!cfg.preview) return;
+  if (!caddyHash) caddyHash = (await docker(["run", "--rm", "caddy:2-alpine", "caddy", "hash-password", "--plaintext", cfg.preview.password])).trim();
+  const blocks = previews.map((p) =>
+    `:${PREVIEW_PORT(p.slot)} {\n  basic_auth {\n    factory ${caddyHash}\n  }\n  reverse_proxy 127.0.0.1:${INTERNAL_PORT(p.slot)}\n}`);
+  writeFileSync(CADDYFILE, `{\n  auto_https off\n  admin localhost:2019\n}\n\n${blocks.join("\n\n")}\n`);
+  const running = (await docker(["ps", "--filter", "name=^sf-caddy$", "--format", "{{.Names}}"])).trim();
+  if (!running) {
+    await docker(["rm", "-f", "sf-caddy"]).catch(() => {});
+    await docker(["run", "-d", "--name", "sf-caddy", "--network", "host", "--restart", "unless-stopped",
+      "-v", `${CADDYFILE}:/etc/caddy/Caddyfile:ro`, "caddy:2-alpine"]);
+  } else {
+    await docker(["exec", "sf-caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]);
+  }
+}
+
+/** Startet/aktualisiert Vorschauen für offene Factory-PRs und räumt alte weg. */
+async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
+  if (!cfg.preview) return;
+  const max = cfg.preview.max ?? 3;
+  let previews = (await listPreviews()).filter((p) => p.repo === repo);
+  const wanted = new Map<number, { url: string; number: number; sha: string }>();
+  for (const issue of issues.filter((i) => stageOf(i) === "pr")) {
+    const pr = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", `factory/${issue.number}`, "--state", "open", "--json", "number,url,headRefOid"]))[0];
+    if (pr) wanted.set(issue.number, { url: pr.url, number: pr.number, sha: pr.headRefOid });
+  }
+
+  let changed = false;
+  // Weg mit Vorschauen ohne offenen PR, mit altem Stand oder abgestürzt
+  for (const p of previews) {
+    const w = wanted.get(p.issue);
+    if (!w || w.sha !== p.sha || !p.running) {
+      await docker(["rm", "-f", p.name]).catch(() => {});
+      log("preview:stopped", { repo, issue: p.issue, reason: !w ? "kein offener PR" : w.sha !== p.sha ? "neuer Stand" : "abgestürzt" });
+      changed = true;
+    }
+  }
+  const all = await listPreviews();
+  previews = all.filter((p) => p.repo === repo);
+  const usedSlots = new Set(all.map((p) => p.slot));
+
+  for (const [issueNr, pr] of wanted) {
+    if (previews.some((p) => p.issue === issueNr)) continue;
+    const slot = Array.from({ length: max }, (_, i) => i + 1).find((s) => !usedSlots.has(s));
+    if (!slot) { log("preview:no-slot", { repo, issue: issueNr }); continue; }
+    usedSlots.add(slot);
+    const ghToken = (await gh(["auth", "token"])).trim();
+    const name = `sf-preview-${repo.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}-${issueNr}`;
+    await docker(["run", "-d", "--name", name,
+      "--label", "sf.preview=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issueNr}`,
+      "--label", `sf.sha=${pr.sha}`, "--label", `sf.slot=${slot}`,
+      "-p", `127.0.0.1:${INTERNAL_PORT(slot)}:3000`, "--memory", cfg.preview.memory ?? "1500m",
+      "-e", `REPO=${repo}`, "-e", `BRANCH=factory/${issueNr}`, "-e", "GH_TOKEN",
+      "--entrypoint", "/factory/preview.sh", cfg.image], { GH_TOKEN: ghToken });
+    changed = true;
+    const link = `http://${cfg.preview.host}:${PREVIEW_PORT(slot)}`;
+    log("preview:started", { repo, issue: issueNr, pr: pr.number, url: link });
+
+    const key = `${repo}#${pr.number}`;
+    if (!previewNoticePosted.has(key)) {
+      const comments = JSON.parse(await gh(["pr", "view", String(pr.number), "-R", repo, "--json", "comments"])).comments as Comment[];
+      if (!comments.some((c) => c.body.includes(`${MARK}preview -->`))) {
+        await gh(["pr", "comment", String(pr.number), "-R", repo, "--body-file", "-"],
+          `${MARK}preview -->\n### 🔍 Vorschau zum Durchklicken\n\n${link}\n\nLogin: \`factory\` · Passwort: steht in \`/etc/software-factory/config.json\` auf dem Server.\n\n_Die Vorschau braucht nach jedem neuen Stand 1–2 Minuten zum Starten. Nach Merge oder Schließen des PRs wird sie entfernt._`);
+      }
+      previewNoticePosted.add(key);
+    }
+  }
+  if (changed) await writeCaddy(cfg, await listPreviews());
+}
+
 // ---------- Hauptschleife ----------
 
 async function tick(cfg: Config) {
@@ -300,6 +394,8 @@ async function tick(cfg: Config) {
       await syncBoard(cfg, issue.url, "queued");
       free--;
     }
+
+    await syncPreviews(cfg, repo, issues).catch((e) => log("preview:error", { repo, error: String(e) }));
   }
 }
 
@@ -315,7 +411,7 @@ async function main() {
   }
   CONTAINER_UID = Number((await docker(["run", "--rm", "--entrypoint", "id", cfg.image, "-u"])).trim());
   await initBoard(cfg);
-  log("runner:started", { containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow });
+  log("runner:started", { preview: cfg.preview ? `http://${cfg.preview.host}:4001…` : "aus", containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow });
   while (true) {
     try {
       cfg = loadConfig();
