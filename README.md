@@ -37,7 +37,9 @@ Eigener Docker-Container pro Issue
 - **Job-Image** (`image/`): Claude Code, GitHub CLI, git, Node und Chromium (für Tests und Screenshots).
 - **Playbook** (`playbooks/factory.md`): die festen Regeln für jeden Lauf. Stages melden, bei Unklarheit fragen statt raten, Pflicht-Checks, nie selbst mergen.
 - **Workflow** (`workflows/starter-kit/`): wie entwickelt wird. Standard ist der Workflow aus dem [AI Coding Starter Kit](https://github.com/AlexPEClub/ai-coding-starter-kit): `architecture → build → qa` auf Basis deiner Spec, mit getrennten Dateien pro Feature (`spec.md`, `design.md`, `qa-report.md`). Austauschbar, siehe [workflow.md](workflows/starter-kit/workflow.md).
-- **Lokale Skills** (`local-skills/`): `write-spec` (Spec im Interview erarbeiten) und `to-factory` (an die Factory übergeben). In `.claude/skills/` deines Projekts kopieren.
+- **Stack-Packs** (`workflows/starter-kit/stacks/`): Regeln für einen bestimmten Stack (z. B. `nextjs`, `supabase`). Welche gelten, steht in `docs/stack.md` des Projekts. Die Factory ist stack-unabhängig.
+- **Lokale Skills** (`local-skills/`): `init` (Projekt aufsetzen inkl. Stack), `write-spec` (Spec im Interview erarbeiten), `to-factory` (an die Factory übergeben). Einmal pro Rechner installieren: `./scripts/install-local-skills.sh`.
+- **Projekt-Vorlage**: [factory-template](https://github.com/AlexPEClub/factory-template), stack-unabhängig. Neues Projekt: `./scripts/new-project.sh mein-projekt`.
 
 ## Voraussetzungen
 
@@ -58,7 +60,7 @@ Danach:
 2. **GitHub-Login** auf dem Server: `gh auth login -s project`
 3. **Repo anbinden:** `./scripts/add-repo.sh dein-name/dein-repo`
 4. `systemctl restart software-factory`
-5. `local-skills/` in `.claude/skills/` deines Projekts kopieren, Spec mit `/write-spec` schreiben, mit `/to-factory` übergeben
+5. Auf deinem Rechner: `./scripts/install-local-skills.sh`, dann `./scripts/new-project.sh mein-projekt` → Briefing in `docs/briefing.md` → `/init` → `/write-spec` → `/to-factory`
 
 Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger) folgt in `docs/`.
 
@@ -79,7 +81,7 @@ Die Factory liest `.factory/setup.json` im Ziel-Repo:
 }
 ```
 
-Fehlt die Datei, legt der Agent sie beim ersten Lauf an.
+`/init` legt sie passend zum Stack an. Braucht dein Stack eine andere Laufzeit als Node oder Python, ergänzt `/init` eine `.factory/Dockerfile`, die auf dem Factory-Image aufbaut.
 
 ## Claude-Abo: was ist erlaubt?
 

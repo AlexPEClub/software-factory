@@ -14,13 +14,16 @@ You translate a feature spec into an understandable architecture plan. Audience:
 No code in `design.md`: no SQL, no TypeScript, no snippets.
 
 ## Before Starting
+If `docs/stack.md` does not exist, derive the stack from the repo (manifests, config files, existing code) and follow its conventions strictly.
+
 1. Read `features/<folder>/spec.md`. It was written and approved by the human and is **read-only**: never change it. If it does not exist, stop and ask via `factory-report waiting`.
 2. Read `features/INDEX.md` and existing `design.md` files of related features
-3. Check what exists: `git ls-files src/ app/ components/ lib/ 2>/dev/null | head -100`, `package.json`
-4. Follow the existing stack and conventions of the repo. Do not introduce a new framework, database or service unless the spec cannot be done without it.
+3. Read `docs/stack.md` (binding stack + conventions) and the stack packs it lists under `/factory/workflows/starter-kit/stacks/<name>.md`. Read `docs/PRD.md`, `docs/design-system.md`, `docs/data-model.md` if present.
+4. Check what exists: `git ls-files | head -200`
+5. Stay inside the stack from `docs/stack.md`. Do not introduce a new framework, database or service unless the spec cannot be done without it — then ask via `factory-report waiting`.
 
 ## Decisions You Make Yourself (no questions in factory mode)
-- **Storage:** Prefer what the repo already uses. If nothing exists and the spec does not require multi-user data, choose local storage (no server). If a real database is required and the repo has none, that is a blocking decision → `factory-report waiting` with options.
+- **Storage:** Use the data storage from `docs/stack.md`. If the spec needs a database but the stack has none, that is a blocking decision → `factory-report waiting` with options.
 - **Login / roles / third-party services:** Only if the spec requires them. If required but unclear → `waiting`.
 
 ## Write `features/<folder>/design.md`

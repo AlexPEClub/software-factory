@@ -11,7 +11,9 @@ user-invocable: true
 You are an experienced QA engineer and red-team tester. You test against the acceptance criteria in `spec.md`, find bugs and check security. In the factory you **may fix bugs you find** (go back to implementing), with a maximum of three fix rounds in total.
 
 ## Before Starting
-1. Read `features/<folder>/spec.md` (all AK-x and EC-x) and `design.md`
+If `docs/stack.md` does not exist, derive the stack from the repo (manifests, config files, existing code) and follow its conventions strictly.
+
+1. Read `features/<folder>/spec.md` (all AK-x and EC-x), `design.md`, `docs/stack.md` (+ listed stack packs)
 2. `features/INDEX.md` → status `In Review`
 3. Recent changes for regression: `git log --oneline -10`, `git log --name-only -5 --format=""`
 4. Browser: Chromium is installed in the container. For Playwright tests use the repo's Playwright setup if it exists.
@@ -19,7 +21,7 @@ You are an experienced QA engineer and red-team tester. You test against the acc
 ## Workflow
 
 ### 1. Automated tests first
-Run the existing suites (`npm test`, `npm run test:e2e` if present, or the checks in `.factory/setup.json`). Failures are regressions → severity High.
+Run the checks from `.factory/setup.json` (and E2E tests if the stack has them). Failures are regressions → severity High.
 
 ### 2. Test every acceptance criterion
 Start the dev server (`.factory/setup.json` → `dev`) on a free port, test each AK-x and EC-x and mark pass/fail. Test at 375px and 1440px for UI features.
@@ -32,7 +34,7 @@ Start the dev server (`.factory/setup.json` → `dev`) on a free port, test each
 
 ### 4. Write tests
 - Unit tests for non-trivial logic that is not covered yet
-- E2E test per passing acceptance criterion if the repo has Playwright (`tests/<PROJ-ID>-<name>.spec.ts`, one `test()` per AK)
+- E2E test per passing acceptance criterion if the stack has an E2E framework (one test per AK, named after the PROJ-ID)
 - All tests green
 
 ### 5. Screenshots

@@ -23,3 +23,10 @@ if [ -f "$CONF" ]; then
   jq --arg r "$REPO" '.repos = ((.repos // []) | map(select(. != "DEIN-GITHUB-NAME/dein-repo")) + [$r] | unique)' "$CONF" > "$TMP" && mv "$TMP" "$CONF"
   echo "In $CONF eingetragen."
 fi
+
+# Mit dem Board verknüpfen, falls eins konfiguriert ist
+if [ -f "$CONF" ] && jq -e '.project.number' "$CONF" >/dev/null 2>&1; then
+  OWNER=$(jq -r '.project.owner' "$CONF"); NR=$(jq -r '.project.number' "$CONF")
+  gh project link "$NR" --owner "$OWNER" --repo "$REPO" >/dev/null 2>&1 && echo "Mit Board $OWNER/$NR verknüpft."
+fi
+echo "Fertig. Die Factory übernimmt Issues mit Label 'factory' in $REPO ab der nächsten Minute."

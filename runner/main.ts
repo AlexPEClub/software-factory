@@ -176,6 +176,24 @@ function buildPrompt(cfg: Config, repo: string, issue: Issue, mode: Mode, prUrl?
   ].join("\n");
 }
 
+/** Job-Image für ein Repo: Standard-Image oder, falls das Repo .factory/Dockerfile hat, ein darauf aufbauendes eigenes. */
+async function imageFor(cfg: Config, repo: string): Promise<string> {
+  let file: { sha: string; content: string };
+  try { file = JSON.parse(await gh(["api", `repos/${repo}/contents/.factory/Dockerfile`])); } catch { return cfg.image; }
+  const base = (await docker(["image", "inspect", cfg.image, "--format", "{{.Id}}"])).trim().replace("sha256:", "").slice(0, 12);
+  const tag = `sf-job-${repo.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}:${file.sha.slice(0, 12)}-${base}`;
+  const exists = await docker(["image", "inspect", tag]).then(() => true).catch(() => false);
+  if (!exists) {
+    const dir = join(cfg.dataDir, "images", repo.replace("/", "__"));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "Dockerfile"), Buffer.from(file.content, "base64").toString("utf8"));
+    log("image:building", { repo, tag });
+    await docker(["build", "-q", "-t", tag, dir]);
+    log("image:built", { repo, tag });
+  }
+  return tag;
+}
+
 async function launch(cfg: Config, repo: string, issue: Issue, mode: Mode, prUrl?: string) {
   const name = containerName(repo, issue.number);
   const dir = jobDir(cfg, repo, issue.number);
@@ -202,7 +220,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, mode: Mode, prUrl
     "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`,
     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
     "-v", `${dir}:/work`,
-    cfg.image,
+    await imageFor(cfg, repo),
   ], { GH_TOKEN: ghToken });
   log("job:started", { repo, issue: issue.number, mode, container: name });
 }
@@ -314,7 +332,7 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
       "--label", `sf.sha=${pr.sha}`, "--label", `sf.slot=${slot}`,
       "-p", `127.0.0.1:${INTERNAL_PORT(slot)}:3000`, "--memory", cfg.preview.memory ?? "1500m",
       "-e", `REPO=${repo}`, "-e", `BRANCH=factory/${issueNr}`, "-e", "GH_TOKEN",
-      "--entrypoint", "/factory/preview.sh", cfg.image], { GH_TOKEN: ghToken });
+      "--entrypoint", "/factory/preview.sh", await imageFor(cfg, repo)], { GH_TOKEN: ghToken });
     changed = true;
     const link = `http://${cfg.preview.host}:${PREVIEW_PORT(slot)}`;
     log("preview:started", { repo, issue: issueNr, pr: pr.number, url: link });

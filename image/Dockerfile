@@ -28,6 +28,8 @@ RUN chmod +x /usr/local/bin/factory-* /factory/entrypoint.sh /factory/preview.sh
 USER pwuser
 ENV HOME=/home/pwuser
 RUN curl -fsSL https://claude.ai/install.sh | bash
+# Python-Projekte: uv (verwaltet Python-Versionen und Pakete selbst)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH=/home/pwuser/.local/bin:$PATH
 
 WORKDIR /work
