@@ -1,4 +1,4 @@
-# Design: #<issue-nr> <Feature-Name>
+# Design: <PROJ-ID> <Feature-Name>
 
 **Spec:** [spec.md](spec.md)
 

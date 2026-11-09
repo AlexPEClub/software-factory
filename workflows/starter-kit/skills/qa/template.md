@@ -1,4 +1,4 @@
-# QA-Bericht: #<issue-nr> <Feature-Name>
+# QA-Bericht: <PROJ-ID> <Feature-Name> (#<issue-nr>)
 
 **Spec:** [spec.md](spec.md) · **Design:** [design.md](design.md)
 **Getestet am:** YYYY-MM-DD · **Commit:** `<sha>`

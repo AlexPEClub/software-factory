@@ -2,7 +2,14 @@
 
 Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft. Dein Laptop kann dabei zu sein.
 
-Du schreibst ein GitHub Issue und gibst ihm das Label `factory`. Ein Agent übernimmt: prüft das Issue, schreibt eine Spec, plant, entwickelt, testet und öffnet einen Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ist etwas unklar, fragt er im Issue nach und macht weiter, sobald du antwortest. **Gemergt wird von dir.**
+**Du entscheidest, was gebaut wird. Die Factory baut es.**
+
+1. Du schreibst lokal mit Claude Code die Spec (`/write-spec`), prüfst sie und pushst sie.
+2. Du übergibst sie mit `/to-factory` an die Factory. Das legt ein GitHub Issue mit Label `factory` an, das auf die Spec zeigt.
+3. Ein Agent auf deinem Server übernimmt: Architektur, Umsetzung, Tests, Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ist etwas unklar, fragt er im Issue nach und macht weiter, sobald du antwortest.
+4. Du prüfst den Pull Request und mergst. **Gemergt wird immer von dir.**
+
+Bugs gehen auch ohne Spec: Issue mit Label `factory` anlegen und beschreiben, was falsch ist und was du erwartest.
 
 > 🚧 Erste Version, in aktiver Entwicklung.
 
@@ -29,7 +36,8 @@ Eigener Docker-Container pro Issue
 - **Runner** (`runner/`): kleiner Dienst auf dem Server. Holt Issues, startet Container, setzt Labels und Board-Status. Schreibt selbst keinen Code.
 - **Job-Image** (`image/`): Claude Code, GitHub CLI, git, Node und Chromium (für Tests und Screenshots).
 - **Playbook** (`playbooks/factory.md`): die festen Regeln für jeden Lauf. Stages melden, bei Unklarheit fragen statt raten, Pflicht-Checks, nie selbst mergen.
-- **Workflow** (`workflows/starter-kit/`): wie entwickelt wird. Standard ist der Workflow aus dem [AI Coding Starter Kit](https://github.com/AlexPEClub/ai-coding-starter-kit): `write-spec → architecture → build → qa`, mit getrennten Dateien pro Feature (`spec.md`, `design.md`, `qa-report.md`). Austauschbar, siehe [workflow.md](workflows/starter-kit/workflow.md).
+- **Workflow** (`workflows/starter-kit/`): wie entwickelt wird. Standard ist der Workflow aus dem [AI Coding Starter Kit](https://github.com/AlexPEClub/ai-coding-starter-kit): `architecture → build → qa` auf Basis deiner Spec, mit getrennten Dateien pro Feature (`spec.md`, `design.md`, `qa-report.md`). Austauschbar, siehe [workflow.md](workflows/starter-kit/workflow.md).
+- **Lokale Skills** (`local-skills/`): `write-spec` (Spec im Interview erarbeiten) und `to-factory` (an die Factory übergeben). In `.claude/skills/` deines Projekts kopieren.
 
 ## Voraussetzungen
 
@@ -50,7 +58,7 @@ Danach:
 2. **GitHub-Login** auf dem Server: `gh auth login -s project`
 3. **Repo anbinden:** `./scripts/add-repo.sh dein-name/dein-repo`
 4. `systemctl restart software-factory`
-5. Ein Issue mit Label `factory` anlegen
+5. `local-skills/` in `.claude/skills/` deines Projekts kopieren, Spec mit `/write-spec` schreiben, mit `/to-factory` übergeben
 
 Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger) folgt in `docs/`.
 

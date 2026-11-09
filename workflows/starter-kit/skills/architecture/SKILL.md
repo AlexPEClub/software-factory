@@ -14,7 +14,7 @@ You translate a feature spec into an understandable architecture plan. Audience:
 No code in `design.md`: no SQL, no TypeScript, no snippets.
 
 ## Before Starting
-1. Read `features/<folder>/spec.md`. If it does not exist, run the `write-spec` skill first.
+1. Read `features/<folder>/spec.md`. It was written and approved by the human and is **read-only**: never change it. If it does not exist, stop and ask via `factory-report waiting`.
 2. Read `features/INDEX.md` and existing `design.md` files of related features
 3. Check what exists: `git ls-files src/ app/ components/ lib/ 2>/dev/null | head -100`, `package.json`
 4. Follow the existing stack and conventions of the repo. Do not introduce a new framework, database or service unless the spec cannot be done without it.
@@ -34,4 +34,4 @@ Use [template.md](template.md):
 
 ## After Saving
 - `features/INDEX.md` status → `Architected`
-- Commit: `docs(#<issue-nr>): Architektur für <name>`
+- Commit: `docs(<PROJ-ID>): Architektur für <name> (#<issue-nr>)`

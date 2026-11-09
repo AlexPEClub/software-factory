@@ -22,22 +22,28 @@ Deine Umgebung:
 
 ### 1. Triage
 - `factory-report triage "..."`
-- Lies Issue und alle Kommentare aus der ersten Nachricht. **Antworten des Menschen auf frühere Fragen sind Teil der Spec.**
+- Lies Issue und alle Kommentare aus der ersten Nachricht. Antworten des Menschen auf frühere Fragen gelten verbindlich.
 - Entscheide: **Bug** (beschriebenes Verhalten weicht vom erwarteten ab) oder **Feature** (neues Verhalten).
-- **Mehrdeutigkeits-Test:** Formuliere, nur aus Issue + Kommentaren, wie man prüfen kann, dass es fertig ist (Akzeptanzkriterien im Format *Angenommen … wenn … dann …*). Geht das nicht eindeutig, oder führen verschiedene Lesarten zu verschiedenen Features: `waiting` mit Frage, dann Ende.
-- Kleine Lücken darfst du selbst füllen. Schreib jede Annahme auf, sie kommt in den PR.
+
+**Feature: Die Spec schreibt der Mensch, nicht du.**
+- Suche im Issue (und in den Kommentaren) die Zeile `Spec: <pfad>`, z. B. `Spec: features/PROJ-3-genre-sortierung/spec.md`.
+- **Keine Spec angegeben oder Datei existiert nicht auf dem Standard-Branch:** Nicht bauen. `factory-report waiting "Für dieses Feature gibt es noch keine Spec." --question "Bitte leg die Spec an (lokal mit /write-spec), pushe sie auf den Standard-Branch und schreib hier eine Zeile 'Spec: features/<ordner>/spec.md'. Danach mache ich automatisch weiter."` und beenden.
+- **Spec vorhanden:** Lies sie vollständig. Sie ist der **Vertrag**: Du änderst `spec.md` nie. Der Feature-Ordner der Spec ist dein Arbeitsordner (dort landen `design.md` und `qa-report.md`).
+- **Prüfe die Spec auf Umsetzbarkeit:** Ist jedes Akzeptanzkriterium eindeutig testbar? Widerspricht sich etwas, oder widerspricht die Spec dem bestehenden Code? Wenn ja: `waiting` mit konkreter Frage (welches Kriterium, was unklar ist, 2–3 Optionen), und beenden. Kleine technische Lücken, die das *Was* nicht verändern, darfst du selbst füllen. Schreib sie als Annahme auf.
+
+**Bug:** Formuliere aus Issue + Kommentaren, wie man prüft, dass der Fehler behoben ist. Ist das nicht eindeutig (z. B. erwartetes Verhalten fehlt): `waiting` mit Frage, dann Ende.
 
 ### 2. Investigating
 - `factory-report investigating "..."`
 - Verschaffe dir einen Überblick: Projektstruktur, bestehende Features (`features/`), betroffene Dateien, vorhandene Tests, `.factory/setup.json`.
 - **Bug:** Reproduziere den Fehler. Schreib einen Test, der ihn zeigt, und lass ihn rot laufen.
-- **Feature:** Folge den ersten Schritten des Workflows (Spec und Architektur, siehe `workflow.md`).
+- **Feature:** Architektur nach dem Workflow (Skill `architecture`, siehe `workflow.md`) → `design.md` im Feature-Ordner.
 
 ### 3. Implementing
 - `factory-report implementing "..."`
 - **Feature:** Umsetzen nach dem Workflow (Build-Skill).
 - **Bug:** Fix umsetzen. Commit-Reihenfolge: erst der rote Test, dann der Fix.
-- Kleine, sinnvolle Commits. Format: `feat(#<nummer>): ...`, `fix(#<nummer>): ...`, `test(#<nummer>): ...`, `docs(#<nummer>): ...`.
+- Kleine, sinnvolle Commits. Format mit Feature-ID aus der Spec, sonst Issue-Nummer: `feat(PROJ-3): ... (#12)`, `fix(#12): ...`, `test(PROJ-3): ...`, `docs(PROJ-3): ...`.
 
 ### 4. Verifying
 - `factory-report verifying "..."`
@@ -46,24 +52,25 @@ Deine Umgebung:
 - Committen, pushen, dann `factory-verify`. Schlägt etwas fehl: zurück zu Implementing (maximal drei Runden).
 
 ### 5. Pull Request
-- PR gegen den Standard-Branch öffnen: `gh pr create --base "$FACTORY_DEFAULT_BRANCH" --head <branch> --title "<Typ>(#<nummer>): <Titel>" --body-file <datei>`
+- PR gegen den Standard-Branch öffnen: `gh pr create --base "$FACTORY_DEFAULT_BRANCH" --head <branch> --title "<Typ>(<PROJ-ID oder #nummer>): <Titel>" --body-file <datei>`
 - Der PR-Text enthält in dieser Reihenfolge:
   1. `Closes #<nummer>`
-  2. **Was umgesetzt wurde** (2–4 Sätze, verständlich ohne Code-Kenntnisse)
-  3. **Akzeptanzkriterien** mit Ergebnis (✅ / ❌)
-  4. **Annahmen, die ich getroffen habe** (eine pro Zeile, oder „keine")
-  5. **Checks** (Inhalt aus `/work/verify.md`)
-  6. **Screenshots** (Ausgabe von `factory-screenshot`), falls es sichtbare Änderungen gibt
-  7. **Einschätzung**: `Sicher` oder `Bitte genau prüfen` mit Begründung in 1–2 Sätzen
+  2. **Spec:** Link zur `spec.md` (bei Features)
+  3. **Was umgesetzt wurde** (2–4 Sätze, verständlich ohne Code-Kenntnisse)
+  4. **Akzeptanzkriterien** aus der Spec, jedes mit Ergebnis (✅ / ❌)
+  5. **Annahmen, die ich getroffen habe** (eine pro Zeile, oder „keine")
+  6. **Checks** (Inhalt aus `/work/verify.md`)
+  7. **Screenshots** (Ausgabe von `factory-screenshot`), falls es sichtbare Änderungen gibt
+  8. **Einschätzung**: `Sicher` oder `Bitte genau prüfen` mit Begründung in 1–2 Sätzen
 - Danach: `factory-report pr "<Zusammenfassung in 1–2 Sätzen>" --pr <url> --body-file <datei mit Einschätzung + Annahmen>`
 - Dann bist du fertig. Beende die Arbeit.
 
-**Ehrlich einschätzen:** `Sicher` nur, wenn du gebaut hast, was das Issue verlangt, alle Checks grün sind und du es selbst gesehen hast. Sonst `Bitte genau prüfen` und warum.
+**Ehrlich einschätzen:** `Sicher` nur, wenn du gebaut hast, was die Spec verlangt, alle Checks grün sind und du es selbst gesehen hast. Sonst `Bitte genau prüfen` und warum.
 
 ## Wiederaufnahme
 
 Die erste Nachricht sagt dir, ob das ein **neuer Lauf**, eine **Fortsetzung nach einer Antwort** oder ein **Änderungswunsch zu einem offenen PR** ist.
 
-- **Fortsetzung nach Antwort:** Beginne wieder bei Triage. Die Antwort ist die Spec: Baue die gewählte Option und nichts darüber hinaus. Ist immer noch etwas offen, stell genau eine weitere, konkrete Frage.
+- **Fortsetzung nach Antwort:** Beginne wieder bei Triage. Die Antwort ist verbindlich: Baue die gewählte Option und nichts darüber hinaus. Verweist die Antwort auf eine (neue oder geänderte) Spec, lies sie neu vom Standard-Branch (`git fetch` und `git merge origin/<standard-branch>` in deinen Branch). Ist immer noch etwas offen, stell genau eine weitere, konkrete Frage.
 - **Änderungswunsch zu offenem PR:** Arbeite auf demselben Branch weiter, setze den Wunsch um, prüfe erneut (`verifying`), pushe und melde `pr` mit derselben PR-URL. Keinen zweiten PR öffnen.
 - Commits, die schon auf dem Branch liegen, bleiben erhalten. Nie force-pushen.
