@@ -32,7 +32,7 @@ const STAGE_NAMES: Record<string, string> = {
   queued: "Warteschlange", triage: "Triage", investigating: "Analyse", implementing: "Umsetzung",
   verifying: "Prüfung", pr: "PR bereit", waiting: "Wartet auf dich", failed: "Fehlgeschlagen", done: "Fertig",
 };
-const CONTAINER_UID = 1000; // pwuser im Job-Image
+let CONTAINER_UID = 1001; // Nutzer im Job-Image, wird beim Start aus dem Image gelesen
 
 function log(event: string, data: Record<string, unknown> = {}) {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...data }));
@@ -313,8 +313,9 @@ async function main() {
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN && process.env.ANTHROPIC_API_KEY) {
     log("config:warning", { warning: "Beide Login-Arten gesetzt. Es wird nur CLAUDE_CODE_OAUTH_TOKEN an die Jobs gegeben." });
   }
+  CONTAINER_UID = Number((await docker(["run", "--rm", "--entrypoint", "id", cfg.image, "-u"])).trim());
   await initBoard(cfg);
-  log("runner:started", { repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow });
+  log("runner:started", { containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow });
   while (true) {
     try {
       cfg = loadConfig();
