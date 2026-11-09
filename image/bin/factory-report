@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Meldet den aktuellen Stand eines Factory-Jobs an GitHub (Label + bei Bedarf Kommentar).
+#
+#   factory-report <stage> "<zusammenfassung>" [--question "<frage>"] [--pr <url>] [--body-file <datei>]
+#
+# Stages: triage | investigating | implementing | verifying | pr | waiting | failed
+set -euo pipefail
+
+STAGES="queued triage investigating implementing verifying pr waiting failed done"
+STAGE="${1:-}"; SUMMARY="${2:-}"
+shift 2 || true
+QUESTION=""; PR_URL=""; BODY_FILE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --question) QUESTION="$2"; shift 2 ;;
+    --pr) PR_URL="$2"; shift 2 ;;
+    --body-file) BODY_FILE="$2"; shift 2 ;;
+    *) echo "Unbekannte Option: $1" >&2; exit 2 ;;
+  esac
+done
+
+case " $STAGES " in *" $STAGE "*) ;; *) echo "Unbekannte Stage '$STAGE'. Erlaubt: $STAGES" >&2; exit 2 ;; esac
+[ -n "$SUMMARY" ] || { echo "Zusammenfassung fehlt" >&2; exit 2; }
+if [ "$STAGE" = "waiting" ] && [ -z "$QUESTION" ]; then echo "waiting braucht --question" >&2; exit 2; fi
+if [ "$STAGE" = "pr" ] && [ -z "$PR_URL" ]; then echo "pr braucht --pr <url>" >&2; exit 2; fi
+
+: "${REPO:?}" "${ISSUE:?}"
+
+# Label tauschen: alle anderen factory:*-Stage-Labels entfernen
+CURRENT=$(gh issue view "$ISSUE" -R "$REPO" --json labels --jq '.labels[].name' | grep '^factory:' || true)
+ARGS=(--add-label "factory:$STAGE")
+for L in $CURRENT; do [ "$L" != "factory:$STAGE" ] && ARGS+=(--remove-label "$L"); done
+gh issue edit "$ISSUE" -R "$REPO" "${ARGS[@]}" >/dev/null
+
+MARK="<!-- software-factory:$STAGE -->"
+comment() { gh issue comment "$ISSUE" -R "$REPO" --body-file - >/dev/null; }
+
+case "$STAGE" in
+  waiting)
+    { echo "$MARK"; echo "### ❓ Die Factory braucht eine Entscheidung"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
+      echo "_Antworte einfach hier im Issue. Die Factory macht danach automatisch weiter._"; } | comment ;;
+  pr)
+    { echo "$MARK"; echo "### ✅ Pull Request ist fertig: $PR_URL"; echo; echo "$SUMMARY";
+      if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then echo; cat "$BODY_FILE"; fi
+      echo; echo "_Review und Merge machst du. Änderungswünsche einfach hier ins Issue schreiben._"; } | comment ;;
+  failed)
+    { echo "$MARK"; echo "### ⚠️ Die Factory kommt nicht weiter"; echo; echo "$SUMMARY"; echo;
+      echo "_Schreib einen Kommentar mit einem Hinweis, dann versucht sie es erneut._"; } | comment ;;
+esac
+
+jq -n --arg stage "$STAGE" --arg summary "$SUMMARY" --arg question "$QUESTION" --arg pr "$PR_URL" \
+  '{stage:$stage, summary:$summary, question:$question, pr:$pr, at:(now|todate)}' > /work/status.json
+echo "Gemeldet: $STAGE"

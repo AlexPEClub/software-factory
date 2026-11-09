@@ -1,0 +1,11 @@
+{
+  "repos": ["DEIN-GITHUB-NAME/dein-repo"],
+  "label": "factory",
+  "maxParallel": 2,
+  "model": "opus",
+  "workflow": "starter-kit",
+  "pollSeconds": 60,
+  "jobTimeoutMinutes": 90,
+  "containerMemory": "3g",
+  "project": { "owner": "DEIN-GITHUB-NAME", "number": 1 }
+}

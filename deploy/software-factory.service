@@ -1,0 +1,19 @@
+[Unit]
+Description=Software Factory Runner
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/software-factory
+EnvironmentFile=/etc/software-factory/secrets.env
+Environment=FACTORY_CONFIG=/etc/software-factory/config.json
+Environment=HOME=/root
+Environment=PATH=/root/.bun/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/root/.bun/bin/bun run /opt/software-factory/runner/main.ts
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

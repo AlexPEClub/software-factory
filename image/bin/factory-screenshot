@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Macht einen Screenshot einer Seite (headless Chromium) und lädt ihn nach GitHub hoch,
+# damit er im Pull Request angezeigt werden kann. Gibt eine Markdown-Bildzeile aus.
+#
+#   factory-screenshot <url> <name> ["<bildunterschrift>"] [--width 1280] [--height 800]
+set -euo pipefail
+
+URL="${1:?URL fehlt}"; NAME="${2:?Name fehlt}"; CAPTION="${3:-$NAME}"
+shift 2; [ $# -gt 0 ] && [[ "$1" != --* ]] && shift
+WIDTH=1280; HEIGHT=800
+while [ $# -gt 0 ]; do
+  case "$1" in --width) WIDTH="$2"; shift 2 ;; --height) HEIGHT="$2"; shift 2 ;; *) shift ;; esac
+done
+: "${REPO:?}" "${ISSUE:?}"
+
+SLUG=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | sed 's/^-//;s/-$//')
+mkdir -p /work/screenshots
+FILE="/work/screenshots/$SLUG.png"
+
+node -e '
+const { chromium } = require("playwright");
+(async () => {
+  const [url, file, w, h] = process.argv.slice(1);
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: +w, height: +h } });
+  await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+  await page.screenshot({ path: file });
+  await browser.close();
+})().catch(e => { console.error(e.message); process.exit(1); });
+' "$URL" "$FILE" "$WIDTH" "$HEIGHT"
+
+# Hochladen auf den Branch "factory-assets" (wird bei Bedarf angelegt)
+ASSET_BRANCH="factory-assets"
+if ! gh api "repos/$REPO/branches/$ASSET_BRANCH" >/dev/null 2>&1; then
+  DEFAULT=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
+  BASE_SHA=$(gh api "repos/$REPO/git/ref/heads/$DEFAULT" --jq .object.sha)
+  gh api "repos/$REPO/git/refs" -f ref="refs/heads/$ASSET_BRANCH" -f sha="$BASE_SHA" >/dev/null
+fi
+REMOTE_PATH="screenshots/issue-$ISSUE/$(date +%s)-$SLUG.png"
+base64 -w0 "$FILE" > /tmp/shot.b64
+jq -n --arg msg "Screenshot für #$ISSUE: $CAPTION" --arg branch "$ASSET_BRANCH" --rawfile content /tmp/shot.b64 \
+  '{message:$msg, branch:$branch, content:$content}' \
+  | gh api -X PUT "repos/$REPO/contents/$REMOTE_PATH" --input - >/dev/null
+
+echo "![${CAPTION}](https://github.com/$REPO/blob/$ASSET_BRANCH/$REMOTE_PATH?raw=true)"
