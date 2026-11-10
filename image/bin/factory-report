@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Meldet den aktuellen Stand eines Factory-Jobs an GitHub (Label + bei Bedarf Kommentar).
+# Meldet den Stand eines Factory-Jobs an GitHub (Status-Label + bei Bedarf Kommentar).
 #
-#   factory-report <stage> "<zusammenfassung>" [--question "<frage>"] [--pr <url>] [--body-file <datei>]
-#
-# Stages: triage | investigating | implementing | verifying | pr | waiting | failed
+# Phase "Prüfung":  factory-report checking  "<was du prüfst>"
+#                   factory-report approved  "<Ergebnis der Prüfung>"
+#                   factory-report question  "<was du herausgefunden hast>" --question "<Frage mit Optionen>"
+#                   factory-report rejected  "<Grund>" --question "<was der Mensch tun muss>"
+# Phase "Bau":      factory-report architecture | implementing | verifying  "<was du tust>"
+#                   factory-report review    "<Zusammenfassung>" --pr <url> [--body-file <datei>]
+#                   factory-report question  "..." --question "..."
+# Immer:            factory-report failed    "<Grund>"
 set -euo pipefail
 
-STAGES="queued triage investigating implementing verifying pr waiting failed done"
 STAGE="${1:-}"; SUMMARY="${2:-}"
 shift 2 || true
 QUESTION=""; PR_URL=""; BODY_FILE=""
@@ -19,28 +23,40 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case " $STAGES " in *" $STAGE "*) ;; *) echo "Unbekannte Stage '$STAGE'. Erlaubt: $STAGES" >&2; exit 2 ;; esac
+STEP=""
+case "$STAGE" in
+  checking|approved|question|rejected|review|failed) STATUS="$STAGE" ;;
+  architecture|implementing|verifying) STATUS="working"; STEP="$STAGE" ;;
+  *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying review failed" >&2; exit 2 ;;
+esac
 [ -n "$SUMMARY" ] || { echo "Zusammenfassung fehlt" >&2; exit 2; }
-if [ "$STAGE" = "waiting" ] && [ -z "$QUESTION" ]; then echo "waiting braucht --question" >&2; exit 2; fi
-if [ "$STAGE" = "pr" ] && [ -z "$PR_URL" ]; then echo "pr braucht --pr <url>" >&2; exit 2; fi
+case "$STAGE" in question|rejected) [ -n "$QUESTION" ] || { echo "$STAGE braucht --question" >&2; exit 2; } ;; esac
+[ "$STAGE" = "review" ] && [ -z "$PR_URL" ] && { echo "review braucht --pr <url>" >&2; exit 2; }
 
 : "${REPO:?}" "${ISSUE:?}"
+PHASE="${PHASE:-build}"
 
-# Label tauschen: alle anderen factory:*-Stage-Labels entfernen
+# Status-Label tauschen
 CURRENT=$(gh issue view "$ISSUE" -R "$REPO" --json labels --jq '.labels[].name' | grep '^factory:' || true)
-ARGS=(--add-label "factory:$STAGE")
-for L in $CURRENT; do [ "$L" != "factory:$STAGE" ] && ARGS+=(--remove-label "$L"); done
+ARGS=(--add-label "factory:$STATUS")
+for L in $CURRENT; do [ "$L" != "factory:$STATUS" ] && ARGS+=(--remove-label "$L"); done
 gh issue edit "$ISSUE" -R "$REPO" "${ARGS[@]}" >/dev/null
 
-MARK="<!-- software-factory:$STAGE -->"
+MARK="<!-- software-factory:$STATUS:$PHASE -->"
 comment() { gh issue comment "$ISSUE" -R "$REPO" --body-file - >/dev/null; }
 
 case "$STAGE" in
-  waiting)
-    { echo "$MARK"; echo "### ❓ Die Factory braucht eine Entscheidung"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
+  approved)
+    { echo "$MARK"; echo "### ✅ Geprüft und freigegeben"; echo; echo "$SUMMARY"; echo;
+      echo "_Die Factory baut das Feature, sobald ein Platz frei ist._"; } | comment ;;
+  question)
+    { echo "$MARK"; echo "### ❓ Rückfrage"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
       echo "_Antworte einfach hier im Issue. Die Factory macht danach automatisch weiter._"; } | comment ;;
-  pr)
-    { echo "$MARK"; echo "### ✅ Pull Request ist fertig: $PR_URL"; echo; echo "$SUMMARY";
+  rejected)
+    { echo "$MARK"; echo "### ⛔ So kann die Factory das nicht bauen"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
+      echo "_Wenn du die Spec angepasst hast, schreib hier einen kurzen Kommentar. Dann prüft die Factory erneut._"; } | comment ;;
+  review)
+    { echo "$MARK"; echo "### 👀 Bereit zum Review: $PR_URL"; echo; echo "$SUMMARY";
       if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then echo; cat "$BODY_FILE"; fi
       echo; echo "_Review und Merge machst du. Änderungswünsche einfach hier ins Issue schreiben._"; } | comment ;;
   failed)
@@ -48,6 +64,6 @@ case "$STAGE" in
       echo "_Schreib einen Kommentar mit einem Hinweis, dann versucht sie es erneut._"; } | comment ;;
 esac
 
-jq -n --arg stage "$STAGE" --arg summary "$SUMMARY" --arg question "$QUESTION" --arg pr "$PR_URL" \
-  '{stage:$stage, summary:$summary, question:$question, pr:$pr, at:(now|todate)}' > /work/status.json
+jq -n --arg status "$STATUS" --arg step "$STEP" --arg phase "$PHASE" --arg summary "$SUMMARY" --arg question "$QUESTION" --arg pr "$PR_URL" \
+  '{status:$status, step:$step, phase:$phase, summary:$summary, question:$question, pr:$pr, at:(now|todate)}' > /work/status.json
 echo "Gemeldet: $STAGE"

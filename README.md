@@ -11,6 +11,8 @@ Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Se
 
 Bugs gehen auch ohne Spec: Issue mit Label `factory` anlegen und beschreiben, was falsch ist und was du erwartest.
 
+**Status auf dem Board:** Neu → In Prüfung → Rückfrage / Abgelehnt → Freigegeben → In Arbeit (Architektur · Umsetzung · Tests) → Review → Fertig, bei technischen Fehlern Fehlgeschlagen. Prüfung und Bau sind getrennte Läufe: Neue Issues werden sofort geprüft, gebaut wird, sobald ein Platz frei ist.
+
 > 🚧 Erste Version, in aktiver Entwicklung.
 
 ## So funktioniert es

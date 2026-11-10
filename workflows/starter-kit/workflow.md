@@ -23,18 +23,21 @@ features/
     qa-report.md                   ERGEBNIS: Testlauf gegen die Akzeptanzkriterien (Factory)
 ```
 
-## Zuordnung zu den Factory-Stages
+## Zuordnung zu den Factory-Phasen
 
-- **Feature** (Issue enthält `Spec: features/<ordner>/spec.md`)
-  - `triage` → Spec lesen und auf Testbarkeit prüfen, nicht verändern
-  - `investigating` → Skill `architecture` → `design.md`
-  - `implementing` → Skill `build`
-  - `verifying` → Skill `qa` → `qa-report.md`
-- **Feature ohne Spec** → die Factory baut nicht, sondern bittet im Issue um eine Spec
-- **Bug** (keine Spec nötig)
-  - `investigating` → reproduzieren, roten Test schreiben
-  - `implementing` → Fix
-  - `verifying` → Skill `qa` im Bug-Modus
+- **Prüfung** (eigener, kurzer Lauf, baut nichts)
+  - Feature: Spec vorhanden? Jedes Akzeptanzkriterium testbar? Widerspruchsfrei, passend zum Stack, Voraussetzungen erfüllt?
+  - Bug: Ist klar, was falsch ist und was stattdessen passieren soll?
+  - Ergebnis: **Freigegeben**, **Rückfrage** oder **Abgelehnt** (Feature ohne Spec wird immer abgelehnt)
+- **Bau** (startet automatisch, sobald ein Platz frei ist)
+  - Schritt **Architektur** → Skill `architecture` → `design.md` (Bug: reproduzieren, roter Test)
+  - Schritt **Umsetzung** → Skill `build` (Bug: Fix)
+  - Schritt **Tests** → Skill `qa` → `qa-report.md`
+  - Ergebnis: Pull Request → **Review**
+
+## Status auf dem Board
+
+Neu → In Prüfung → (Rückfrage | Abgelehnt) → Freigegeben → In Arbeit (Schritt: Architektur · Umsetzung · Tests) → Review → Fertig. Technische Fehler: Fehlgeschlagen (ein Kommentar startet einen neuen Versuch).
 
 ## Status in `features/INDEX.md`
 

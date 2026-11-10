@@ -8,6 +8,7 @@ log() { echo "[factory] $*"; }
 
 : "${REPO:?}" "${ISSUE:?}" "${BRANCH:?}"
 MODEL="${MODEL:-opus}"
+export PHASE="${PHASE:-build}"   # check = nur prüfen, build = bauen
 WORKFLOW="${WORKFLOW:-starter-kit}"
 
 # Workflow-Skills als Nutzer-Skills bereitstellen (landen nicht im Ziel-Repo)
@@ -37,8 +38,8 @@ else
   git checkout --quiet -B "$BRANCH" "origin/$DEFAULT_BRANCH"
 fi
 
-# Abhängigkeiten installieren, falls das Repo ein Setup-Rezept hat
-if [ -f .factory/setup.json ]; then
+# Abhängigkeiten installieren (nur zum Bauen nötig)
+if [ "$PHASE" = "build" ] && [ -f .factory/setup.json ]; then
   INSTALL=$(jq -r '.install // empty' .factory/setup.json)
   if [ -n "$INSTALL" ]; then
     log "Setup: $INSTALL"
@@ -47,7 +48,7 @@ if [ -f .factory/setup.json ]; then
 fi
 
 export FACTORY_DEFAULT_BRANCH="$DEFAULT_BRANCH"
-log "Starte Claude Code ($MODEL, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
+log "Starte Claude Code ($MODEL, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
 set +e
 claude -p "$(cat /work/prompt.md)" \
   --append-system-prompt-file /factory/playbook.md \

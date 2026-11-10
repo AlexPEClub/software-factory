@@ -7,16 +7,18 @@ CONF=/etc/software-factory/config.json
 
 label() { gh label create "$1" -R "$REPO" --color "$2" --description "$3" --force >/dev/null; echo "  ✓ $1"; }
 echo "Labels in $REPO:"
-label "factory"              "5319E7" "Die Software Factory soll dieses Issue bearbeiten"
-label "factory:queued"       "C5DEF5" "Factory: wartet auf einen freien Platz"
-label "factory:triage"       "BFD4F2" "Factory: prüft das Issue"
-label "factory:investigating" "BFD4F2" "Factory: analysiert"
-label "factory:implementing" "1D76DB" "Factory: setzt um"
-label "factory:verifying"    "1D76DB" "Factory: prüft das Ergebnis"
-label "factory:pr"           "0E8A16" "Factory: Pull Request ist fertig"
-label "factory:waiting"      "FBCA04" "Factory: braucht eine Entscheidung von dir"
-label "factory:failed"       "D93F0B" "Factory: kommt nicht weiter"
-label "factory:done"         "006B75" "Factory: gemergt"
+label "factory"                "5319E7" "Die Software Factory soll dieses Issue bearbeiten"
+label "factory:new"            "D4C5F9" "Factory: Neu, noch nicht geprüft"
+label "factory:checking"       "BFD4F2" "Factory: prüft Spec bzw. Bug-Beschreibung"
+label "factory:question"       "FBCA04" "Factory: Rückfrage, braucht eine Antwort von dir"
+label "factory:rejected"       "B60205" "Factory: so nicht baubar, Spec überarbeiten"
+label "factory:approved"       "8250DF" "Factory: freigegeben, wartet auf freien Platz"
+label "factory:working"        "F9A03F" "Factory: in Arbeit (Architektur, Umsetzung, Tests)"
+label "factory:review"         "E99695" "Factory: PR bereit, du bist dran"
+label "factory:done"           "0E8A16" "Factory: gemergt"
+label "factory:failed"         "D93F0B" "Factory: technisch hängen geblieben"
+# Labels aus der ersten Version entfernen
+for old in queued triage investigating implementing verifying pr waiting; do gh label delete "factory:$old" -R "$REPO" --yes >/dev/null 2>&1 || true; done
 
 if [ -f "$CONF" ]; then
   TMP=$(mktemp)
