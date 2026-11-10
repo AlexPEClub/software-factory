@@ -66,6 +66,17 @@ Danach:
 
 Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger) folgt in `docs/`.
 
+## Messen und verbessern
+
+Jeder Lauf wird mit Dauer, Schritten und Ergebnis in `/var/lib/software-factory/metrics.jsonl` festgehalten. Auswertung auf dem Server:
+
+```bash
+factory-stats            # alles
+factory-stats --tage 7   # letzte Woche
+```
+
+Weil jede Aufgabe denselben Ablauf durchläuft, siehst du so, ob eine Änderung am Playbook, an den Skills oder am Modell etwas bringt: Laufzeit pro Aufgabe, Anteil Rückfragen, wie oft die Abnahme beim ersten Mal besteht.
+
 ## Das Ziel-Repo
 
 Die Factory liest `.factory/setup.json` im Ziel-Repo:

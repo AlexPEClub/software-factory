@@ -3,7 +3,7 @@
 // startet pro Issue einen Docker-Container mit Claude Code und hält Labels und Board aktuell.
 // Er schreibt selbst nie Code. Das macht der Agent im Container.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chownSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chownSync } from "node:fs";
 import { join } from "node:path";
 
 type Config = {
@@ -30,7 +30,7 @@ type Config = {
 
 type Comment = { author: { login: string }; body: string; createdAt: string };
 type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
-type Container = { name: string; repo: string; issue: number; phase: Phase; running: boolean; startedAt: string; exitCode: number };
+type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
 type Phase = "check" | "build" | "accept";
 type Mode = "new" | "answer" | "change-request" | "retry" | "rework";
 
@@ -212,6 +212,8 @@ async function listContainers(): Promise<Container[]> {
     result.push({
       name, repo: info.Config.Labels["sf.repo"], issue: Number(info.Config.Labels["sf.issue"]),
       phase: (info.Config.Labels["sf.phase"] ?? "build") as Phase,
+      mode: info.Config.Labels["sf.mode"] ?? "new",
+      finishedAt: info.State.FinishedAt,
       running: info.State.Running, startedAt: info.State.StartedAt, exitCode: info.State.ExitCode,
     });
   }
@@ -291,7 +293,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
   await docker(["rm", "-f", name]).catch(() => {});
   await docker([
     "run", "-d", "--name", name,
-    "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`,
+    "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`, "--label", `sf.mode=${mode}`,
     "--memory", cfg.containerMemory, "--shm-size", "1g",
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
     "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
@@ -324,6 +326,13 @@ async function finish(cfg: Config, c: Container) {
     minutes: result.duration_ms ? Math.round(result.duration_ms / 60000) : null,
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null,
   });
+  // Dauerhaft festhalten, auch nach dem Aufräumen: Grundlage für factory-stats
+  const seconds = Math.max(0, Math.round((Date.parse(c.finishedAt) - Date.parse(c.startedAt)) / 1000));
+  appendFileSync(join(cfg.dataDir, "metrics.jsonl"), JSON.stringify({
+    t: new Date().toISOString(), repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode,
+    status: ended ? status.status : "failed", exitCode: c.exitCode, seconds: Number.isFinite(seconds) ? seconds : null,
+    turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, model: cfg.model,
+  }) + "\n");
 
   if (!ended) {
     let reason = typeof result.result === "string" ? result.result.slice(0, 1500) : "";

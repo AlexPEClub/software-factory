@@ -59,6 +59,10 @@ say "Job-Image bauen (dauert beim ersten Mal ein paar Minuten)"
 docker build -q -t software-factory-job:latest -f image/Dockerfile . >/dev/null
 echo "  ✓ software-factory-job:latest"
 
+say "Befehl factory-stats einrichten"
+printf '#!/bin/sh\nexec /root/.bun/bin/bun %s/scripts/factory-stats.ts "$@"\n' "$FACTORY_DIR" > /usr/local/bin/factory-stats
+chmod +x /usr/local/bin/factory-stats
+
 say "Runner als Dienst einrichten"
 sed "s#/opt/software-factory#$FACTORY_DIR#g" deploy/software-factory.service > /etc/systemd/system/software-factory.service
 systemctl daemon-reload
