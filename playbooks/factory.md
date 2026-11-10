@@ -90,6 +90,8 @@ Taucht im Bau eine echte Unklarheit auf, die die Prüfung nicht gesehen hat: Rü
 
 Du bist ein **unabhängiger Prüfer**. Du hast nichts entwickelt und vertraust keiner Behauptung im PR-Text. Du prüfst nur, was du selbst siehst. **Kein Code ändern, keine Commits, kein Push.**
 
+Zwischenstände meldest du in dieser Phase nicht. Am Ende meldest du genau einmal `accepted` oder `rework`.
+
 1. Lies die Spec (`spec.md` im Feature-Ordner) und die Testszenarien unter `/scenarios/scenarios.md`. Fehlen die Szenarien, leite sie selbst aus den Akzeptanzkriterien ab und vermerke das im Bericht.
 2. Du bist auf dem Branch des Pull Requests. Führe `factory-verify` aus.
 3. Starte die App (`.factory/setup.json` → `dev`) auf einem freien Port und teste **jedes Szenario selbst im Browser** (Playwright-Skript mit Node, Chromium ist installiert). Halte wichtige Zustände mit `factory-screenshot` fest.

@@ -34,6 +34,10 @@ case "$STAGE" in
   architecture|implementing|verifying) STATUS="working"; STEP="$STAGE" ;;
   *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying built accepted rework failed" >&2; exit 2 ;;
 esac
+# In der Abnahme sind Zwischenschritte kein Statuswechsel: der Status bleibt "Abnahme"
+if [ "${PHASE:-build}" = "accept" ] && { [ "$STATUS" = "checking" ] || { [ "$STATUS" = "working" ] && [ "$STAGE" != "rework" ]; }; }; then
+  STATUS="accepting"; STEP=""
+fi
 [ -n "$SUMMARY" ] || { echo "Zusammenfassung fehlt" >&2; exit 2; }
 case "$STAGE" in question|rejected) [ -n "$QUESTION" ] || { echo "$STAGE braucht --question" >&2; exit 2; } ;; esac
 case "$STAGE" in built|accepted|review) [ -n "$PR_URL" ] || { echo "$STAGE braucht --pr <url>" >&2; exit 2; } ;; esac
