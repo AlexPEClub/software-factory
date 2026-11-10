@@ -62,6 +62,14 @@ echo "  ✓ software-factory-job:latest"
 say "Befehl factory-stats einrichten"
 printf '#!/bin/sh\nexec /root/.bun/bin/bun %s/scripts/factory-stats.ts "$@"\n' "$FACTORY_DIR" > /usr/local/bin/factory-stats
 chmod +x /usr/local/bin/factory-stats
+cat > /usr/local/bin/factory-improve <<'EOT'
+#!/bin/sh
+# Verbesserungs-Lauf anstoßen: Der Runner startet ihn beim nächsten Durchlauf (innerhalb einer Minute).
+touch /var/lib/software-factory/improve-requested && echo "Verbesserungs-Lauf angefordert. Fortschritt: journalctl -u software-factory -f"
+EOT
+chmod +x /usr/local/bin/factory-improve
+printf '#!/bin/sh\n# Neue Version der Factory übernehmen (z. B. nach dem Merge eines Verbesserungs-PRs)\nset -e\ncd %s && git pull --ff-only && docker build -q -t software-factory-job:latest -f image/Dockerfile . >/dev/null && systemctl restart software-factory && echo "Factory aktualisiert: $(git log -1 --format=%%s)"\n' "$FACTORY_DIR" > /usr/local/bin/factory-rollout
+chmod +x /usr/local/bin/factory-rollout
 
 say "Runner als Dienst einrichten"
 sed "s#/opt/software-factory#$FACTORY_DIR#g" deploy/software-factory.service > /etc/systemd/system/software-factory.service

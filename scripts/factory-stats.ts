@@ -5,6 +5,7 @@
 //   factory-stats                 alle Läufe
 //   factory-stats --tage 7        nur die letzten 7 Tage
 //   factory-stats --repo name     nur ein Repo (Teil des Namens reicht)
+//   factory-stats --seit 2026-11-12 [--bis 2026-11-19]   Zeitraum, z. B. vor/nach einer Playbook-Änderung
 //   factory-stats --json          Rohdaten zusammengefasst als JSON
 
 import { existsSync, readFileSync } from "node:fs";
@@ -18,11 +19,14 @@ const file = process.env.FACTORY_METRICS ?? "/var/lib/software-factory/metrics.j
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i > 0 ? process.argv[i + 1] : undefined; };
 const days = Number(arg("--tage") ?? 0);
 const repoFilter = arg("--repo");
+const since = arg("--seit"), until = arg("--bis");
 
 if (!existsSync(file)) { console.log(`Noch keine Daten (${file} fehlt).`); process.exit(0); }
 let runs: Run[] = readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 if (days > 0) runs = runs.filter((r) => Date.now() - Date.parse(r.t) <= days * 86400000);
 if (repoFilter) runs = runs.filter((r) => r.repo.includes(repoFilter));
+if (since) runs = runs.filter((r) => r.t >= since);
+if (until) runs = runs.filter((r) => r.t < until);
 if (runs.length === 0) { console.log("Keine Läufe im gewählten Zeitraum."); process.exit(0); }
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
@@ -59,7 +63,7 @@ const summary = {
 
 if (process.argv.includes("--json")) { console.log(JSON.stringify(summary, null, 2)); process.exit(0); }
 
-const zeitraum = days > 0 ? `letzte ${days} Tage` : "gesamt";
+const zeitraum = since || until ? `${since ?? "Anfang"} bis ${until ?? "heute"}` : days > 0 ? `letzte ${days} Tage` : "gesamt";
 console.log(`\nSoftware Factory · Auswertung (${zeitraum}${repoFilter ? `, Repo: ${repoFilter}` : ""})\n`);
 console.log(`Läufe insgesamt              ${summary.laeufe}`);
 console.log(`Aufgaben bis Review          ${summary.aufgabenBisReview}`);

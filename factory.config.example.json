@@ -17,5 +17,9 @@
     "host": "AUTO",
     "password": "AUTO",
     "max": 3
+  },
+  "factoryRepo": "DEIN-GITHUB-NAME/software-factory",
+  "improve": {
+    "everyDays": 7
   }
 }

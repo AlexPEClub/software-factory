@@ -3,7 +3,7 @@
 // startet pro Issue einen Docker-Container mit Claude Code und hält Labels und Board aktuell.
 // Er schreibt selbst nie Code. Das macht der Agent im Container.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chownSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chownSync } from "node:fs";
 import { join } from "node:path";
 
 type Config = {
@@ -24,6 +24,10 @@ type Config = {
   /** Wie oft die Abnahme zurück in die Entwicklung geben darf, bevor sie mit Hinweis durchwinkt */
   maxReworks: number;
   project?: { owner: string; number: number };
+  /** Factory-Repo, in dem der Verbesserungs-Lauf Vorschläge als Pull Request öffnet */
+  factoryRepo?: string;
+  /** Verbesserungs-Lauf automatisch alle X Tage (zusätzlich zu `factory-improve`) */
+  improve?: { everyDays?: number };
   /** Vorschau pro PR: http://<host>:<4000+slot>, mit Passwortschutz (Nutzer "factory") */
   preview?: { host: string; password: string; max?: number; memory?: string };
 };
@@ -326,6 +330,19 @@ async function finish(cfg: Config, c: Container) {
     minutes: result.duration_ms ? Math.round(result.duration_ms / 60000) : null,
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null,
   });
+  // Kurze Zusammenfassung des Laufs dauerhaft festhalten: Grundlage für den Verbesserungs-Lauf
+  try {
+    const runsDir = join(cfg.dataDir, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    let errTail = "";
+    try { errTail = readFileSync(join(dir, "claude.err"), "utf8").slice(-1500); } catch {}
+    writeFileSync(join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}__${c.repo.replace("/", "__")}__${c.issue}__${c.phase}.json`), JSON.stringify({
+      repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode, exitCode: c.exitCode,
+      status: ended ? status.status : "failed", reported: status,
+      result: typeof result.result === "string" ? result.result.slice(0, 4000) : null,
+      turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, errTail,
+    }, null, 2));
+  } catch (e) { log("runs:error", { error: String(e) }); }
   // Dauerhaft festhalten, auch nach dem Aufräumen: Grundlage für factory-stats
   const seconds = Math.max(0, Math.round((Date.parse(c.finishedAt) - Date.parse(c.startedAt)) / 1000));
   appendFileSync(join(cfg.dataDir, "metrics.jsonl"), JSON.stringify({
@@ -441,6 +458,44 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
   if (changed) await writeCaddy(cfg, await listPreviews());
 }
 
+// ---------- Verbesserungs-Lauf ----------
+// Wertet alle bisherigen Läufe aus und schlägt Änderungen an Playbook/Skills als PR im Factory-Repo vor.
+// Auslöser: `factory-improve` (legt eine Anforderungs-Datei an) oder automatisch alle improve.everyDays Tage.
+
+async function maybeImprove(cfg: Config) {
+  const requested = join(cfg.dataDir, "improve-requested");
+  const lastRun = join(cfg.dataDir, "improve-last");
+  const lines = (await docker(["ps", "-a", "--filter", "label=sf.improve=1", "--format", "{{.Names}}|{{.State}}"])).trim().split("\n").filter(Boolean);
+  for (const line of lines) {
+    const [name, state] = line.split("|");
+    if (state === "running") return;
+    const out = await docker(["logs", "--tail", "5", name]).catch(() => "");
+    log("improve:finished", { container: name, tail: out.trim().slice(-600) });
+    await docker(["rm", "-f", name]).catch(() => {});
+  }
+  const days = cfg.improve?.everyDays;
+  const due = !!days && (!existsSync(lastRun) || Date.now() - statSync(lastRun).mtimeMs > days * 86400000);
+  if (!existsSync(requested) && !due) return;
+  rmSync(requested, { force: true });
+  if (!cfg.factoryRepo) { log("improve:error", { error: "factoryRepo fehlt in der Config" }); return; }
+  writeFileSync(lastRun, new Date().toISOString());
+
+  const work = join(cfg.dataDir, "improve-work");
+  const runs = join(cfg.dataDir, "runs");
+  const metrics = join(cfg.dataDir, "metrics.jsonl");
+  mkdirSync(work, { recursive: true }); mkdirSync(runs, { recursive: true });
+  if (!existsSync(metrics)) writeFileSync(metrics, "");
+  chownSync(work, CONTAINER_UID, CONTAINER_UID);
+  const ghToken = (await gh(["auth", "token"])).trim();
+  const authVar = process.env.CLAUDE_CODE_OAUTH_TOKEN ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY";
+  await docker(["run", "-d", "--name", "sf-improve", "--label", "sf.improve=1",
+    "--memory", cfg.containerMemory,
+    "-e", `REPO=${cfg.factoryRepo}`, "-e", `MODEL=${cfg.model}`, "-e", "GH_TOKEN", "-e", authVar,
+    "-v", `${work}:/work`, "-v", `${runs}:/data/runs:ro`, "-v", `${metrics}:/data/metrics.jsonl:ro`,
+    "--entrypoint", "/factory/improve.sh", cfg.image], { GH_TOKEN: ghToken });
+  log("improve:started", { repo: cfg.factoryRepo });
+}
+
 // ---------- Hauptschleife ----------
 
 async function tick(cfg: Config) {
@@ -545,6 +600,8 @@ async function tick(cfg: Config) {
 
     await syncPreviews(cfg, repo, issues).catch((e) => log("preview:error", { repo, error: String(e) }));
   }
+
+  await maybeImprove(cfg).catch((e) => log("improve:error", { error: String(e) }));
 }
 
 async function main() {
