@@ -6,12 +6,12 @@ Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Se
 
 1. Du schreibst lokal mit Claude Code die Spec (`/write-spec`), prüfst sie und pushst sie.
 2. Du übergibst sie mit `/to-factory` an die Factory. Das legt ein GitHub Issue mit Label `factory` an, das auf die Spec zeigt.
-3. Ein Agent auf deinem Server übernimmt: Architektur, Umsetzung, Tests, Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ist etwas unklar, fragt er im Issue nach und macht weiter, sobald du antwortest.
+3. Ein Agent auf deinem Server prüft die Spec und schreibt Testszenarien. Ein zweiter Agent entwickelt: Architektur, Umsetzung, Tests, Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ein dritter, unabhängiger Agent nimmt das Ergebnis mit den Testszenarien ab, die der Entwickler nie gesehen hat. Ist etwas unklar, fragt die Factory im Issue nach und macht weiter, sobald du antwortest.
 4. Du prüfst den Pull Request und mergst. **Gemergt wird immer von dir.**
 
 Bugs gehen auch ohne Spec: Issue mit Label `factory` anlegen und beschreiben, was falsch ist und was du erwartest.
 
-**Status auf dem Board:** Neu → In Prüfung → Rückfrage / Abgelehnt → Freigegeben → In Arbeit (Architektur · Umsetzung · Tests) → Review → Fertig, bei technischen Fehlern Fehlgeschlagen. Prüfung und Bau sind getrennte Läufe: Neue Issues werden sofort geprüft, gebaut wird, sobald ein Platz frei ist.
+**Status auf dem Board:** Neu → In Prüfung → Rückfrage / Abgelehnt → Freigegeben → In Arbeit (Architektur · Umsetzung · Tests) → Abnahme → Review → Fertig, bei technischen Fehlern Fehlgeschlagen. Prüfung, Entwicklung und Abnahme sind getrennte Läufe in eigenen Containern: Neue Issues werden sofort geprüft, entwickelt wird, sobald ein Platz frei ist.
 
 > 🚧 Erste Version, in aktiver Entwicklung.
 

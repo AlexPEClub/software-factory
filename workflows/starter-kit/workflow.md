@@ -28,16 +28,20 @@ features/
 - **Prüfung** (eigener, kurzer Lauf, baut nichts)
   - Feature: Spec vorhanden? Jedes Akzeptanzkriterium testbar? Widerspruchsfrei, passend zum Stack, Voraussetzungen erfüllt?
   - Bug: Ist klar, was falsch ist und was stattdessen passieren soll?
+  - Bei Freigabe: Testszenarien für die Abnahme schreiben (`/scenarios/scenarios.md`, außerhalb des Repos, der Entwickler-Agent sieht sie nie)
   - Ergebnis: **Freigegeben**, **Rückfrage** oder **Abgelehnt** (Feature ohne Spec wird immer abgelehnt)
 - **Bau** (startet automatisch, sobald ein Platz frei ist)
   - Schritt **Architektur** → Skill `architecture` → `design.md` (Bug: reproduzieren, roter Test)
   - Schritt **Umsetzung** → Skill `build` (Bug: Fix)
   - Schritt **Tests** → Skill `qa` → `qa-report.md`
-  - Ergebnis: Pull Request → **Review**
+  - Ergebnis: Pull Request → **Abnahme**
+- **Abnahme** (eigener Lauf, neuer Agent, entwickelt nichts)
+  - Kennt nur Spec, Testszenarien und den PR-Branch. Startet die App und testet jedes Szenario im Browser.
+  - Bestanden → **Review**. Nicht bestanden → Befunde zurück in die Entwicklung (max. 2 Runden, danach Review mit „Bitte genau prüfen")
 
 ## Status auf dem Board
 
-Neu → In Prüfung → (Rückfrage | Abgelehnt) → Freigegeben → In Arbeit (Schritt: Architektur · Umsetzung · Tests) → Review → Fertig. Technische Fehler: Fehlgeschlagen (ein Kommentar startet einen neuen Versuch).
+Neu → In Prüfung → (Rückfrage | Abgelehnt) → Freigegeben → In Arbeit (Schritt: Architektur · Umsetzung · Tests) → Abnahme → Review → Fertig. Technische Fehler: Fehlgeschlagen (ein Kommentar startet einen neuen Versuch).
 
 ## Status in `features/INDEX.md`
 
