@@ -14,6 +14,7 @@ label "factory:question"       "FBCA04" "Factory: Rückfrage, braucht eine Antwo
 label "factory:rejected"       "B60205" "Factory: so nicht baubar, Spec überarbeiten"
 label "factory:approved"       "8250DF" "Factory: freigegeben, wartet auf freien Platz"
 label "factory:working"        "F9A03F" "Factory: in Arbeit (Architektur, Umsetzung, Tests)"
+label "factory:accepting"      "1D76DB" "Factory: unabhängige Abnahme läuft"
 label "factory:review"         "E99695" "Factory: PR bereit, du bist dran"
 label "factory:done"           "0E8A16" "Factory: gemergt"
 label "factory:failed"         "D93F0B" "Factory: technisch hängen geblieben"

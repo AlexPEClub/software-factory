@@ -6,8 +6,10 @@
 #                   factory-report question  "<was du herausgefunden hast>" --question "<Frage mit Optionen>"
 #                   factory-report rejected  "<Grund>" --question "<was der Mensch tun muss>"
 # Phase "Bau":      factory-report architecture | implementing | verifying  "<was du tust>"
-#                   factory-report review    "<Zusammenfassung>" --pr <url> [--body-file <datei>]
+#                   factory-report built     "<Zusammenfassung>" --pr <url> [--body-file <datei>]   (PR offen, Abnahme folgt)
 #                   factory-report question  "..." --question "..."
+# Phase "Abnahme":  factory-report accepted  "<Zusammenfassung>" --pr <url> --body-file <abnahmebericht>
+#                   factory-report rework    "<Zusammenfassung der Befunde>" --body-file <befunde>
 # Immer:            factory-report failed    "<Grund>"
 set -euo pipefail
 
@@ -25,13 +27,17 @@ done
 
 STEP=""
 case "$STAGE" in
-  checking|approved|question|rejected|review|failed) STATUS="$STAGE" ;;
+  checking|approved|question|rejected|failed) STATUS="$STAGE" ;;
+  built) STATUS="accepting" ;;
+  accepted|review) STATUS="review" ;;
+  rework) STATUS="working" ;;
   architecture|implementing|verifying) STATUS="working"; STEP="$STAGE" ;;
-  *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying review failed" >&2; exit 2 ;;
+  *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying built accepted rework failed" >&2; exit 2 ;;
 esac
 [ -n "$SUMMARY" ] || { echo "Zusammenfassung fehlt" >&2; exit 2; }
 case "$STAGE" in question|rejected) [ -n "$QUESTION" ] || { echo "$STAGE braucht --question" >&2; exit 2; } ;; esac
-[ "$STAGE" = "review" ] && [ -z "$PR_URL" ] && { echo "review braucht --pr <url>" >&2; exit 2; }
+case "$STAGE" in built|accepted|review) [ -n "$PR_URL" ] || { echo "$STAGE braucht --pr <url>" >&2; exit 2; } ;; esac
+[ "$STAGE" = "rework" ] && { [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] || { echo "rework braucht --body-file mit den Befunden" >&2; exit 2; }; }
 
 : "${REPO:?}" "${ISSUE:?}"
 PHASE="${PHASE:-build}"
@@ -43,22 +49,32 @@ for L in $CURRENT; do [ "$L" != "factory:$STATUS" ] && ARGS+=(--remove-label "$L
 gh issue edit "$ISSUE" -R "$REPO" "${ARGS[@]}" >/dev/null
 
 MARK="<!-- software-factory:$STATUS:$PHASE -->"
+[ "$STAGE" = "rework" ] && MARK="<!-- software-factory:rework:$PHASE -->"
 comment() { gh issue comment "$ISSUE" -R "$REPO" --body-file - >/dev/null; }
 
 case "$STAGE" in
   approved)
     { echo "$MARK"; echo "### ✅ Geprüft und freigegeben"; echo; echo "$SUMMARY"; echo;
-      echo "_Die Factory baut das Feature, sobald ein Platz frei ist._"; } | comment ;;
+      echo "_Die Factory entwickelt das Feature, sobald ein Platz frei ist._"; } | comment ;;
   question)
     { echo "$MARK"; echo "### ❓ Rückfrage"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
       echo "_Antworte einfach hier im Issue. Die Factory macht danach automatisch weiter._"; } | comment ;;
   rejected)
-    { echo "$MARK"; echo "### ⛔ So kann die Factory das nicht bauen"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
+    { echo "$MARK"; echo "### ⛔ So kann die Factory das nicht umsetzen"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
       echo "_Wenn du die Spec angepasst hast, schreib hier einen kurzen Kommentar. Dann prüft die Factory erneut._"; } | comment ;;
-  review)
-    { echo "$MARK"; echo "### 👀 Bereit zum Review: $PR_URL"; echo; echo "$SUMMARY";
-      if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then echo; cat "$BODY_FILE"; fi
-      echo; echo "_Review und Merge machst du. Änderungswünsche einfach hier ins Issue schreiben._"; } | comment ;;
+  built)
+    { echo "$MARK"; echo "### 🔎 Pull Request erstellt, unabhängige Abnahme folgt: $PR_URL"; echo; echo "$SUMMARY"; } | comment ;;
+  accepted|review)
+    REPORT=""; [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] && REPORT=$(cat "$BODY_FILE")
+    { echo "$MARK"; echo "### 👀 Abnahme bestanden, bereit zum Review: $PR_URL"; echo; echo "$SUMMARY";
+      [ -n "$REPORT" ] && { echo; echo "$REPORT"; }
+      echo; echo "_Review und Merge machst du. Änderungswünsche einfach hier ins Issue schreiben._"; } | comment
+    if [ -n "$REPORT" ]; then
+      PR_NR="${PR_URL##*/}"
+      { echo "<!-- software-factory:acceptance -->"; echo "### ✅ Unabhängige Abnahme"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true
+    fi ;;
+  rework)
+    { echo "$MARK"; echo "### 🔁 Abnahme nicht bestanden, zurück in die Entwicklung"; echo; echo "$SUMMARY"; echo; cat "$BODY_FILE"; } | comment ;;
   failed)
     { echo "$MARK"; echo "### ⚠️ Die Factory kommt nicht weiter"; echo; echo "$SUMMARY"; echo;
       echo "_Schreib einen Kommentar mit einem Hinweis, dann versucht sie es erneut._"; } | comment ;;

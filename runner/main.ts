@@ -19,6 +19,10 @@ type Config = {
   containerMemory: string;
   /** Wie viele Prüf-Läufe gleichzeitig (zusätzlich zu den Bau-Läufen) */
   maxChecks: number;
+  /** Wie viele Abnahme-Läufe gleichzeitig */
+  maxAccepts: number;
+  /** Wie oft die Abnahme zurück in die Entwicklung geben darf, bevor sie mit Hinweis durchwinkt */
+  maxReworks: number;
   project?: { owner: string; number: number };
   /** Vorschau pro PR: http://<host>:<4000+slot>, mit Passwortschutz (Nutzer "factory") */
   preview?: { host: string; password: string; max?: number; memory?: string };
@@ -27,8 +31,8 @@ type Config = {
 type Comment = { author: { login: string }; body: string; createdAt: string };
 type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
 type Container = { name: string; repo: string; issue: number; phase: Phase; running: boolean; startedAt: string; exitCode: number };
-type Phase = "check" | "build";
-type Mode = "new" | "answer" | "change-request" | "retry";
+type Phase = "check" | "build" | "accept";
+type Mode = "new" | "answer" | "change-request" | "retry" | "rework";
 
 const CONFIG_PATH = process.env.FACTORY_CONFIG ?? "/etc/software-factory/config.json";
 const MARK = "<!-- software-factory:";
@@ -40,6 +44,7 @@ const STATUS: Record<string, { name: string; color: string; description: string 
   rejected: { name: "Abgelehnt", color: "RED", description: "So nicht baubar, die Spec muss überarbeitet werden" },
   approved: { name: "Freigegeben", color: "PURPLE", description: "Prüfung bestanden, wartet auf einen freien Platz" },
   working: { name: "In Arbeit", color: "ORANGE", description: "Architektur, Umsetzung, Tests" },
+  accepting: { name: "Abnahme", color: "BLUE", description: "Ein unabhängiger Agent testet den Pull Request" },
   review: { name: "Review", color: "PINK", description: "PR und Vorschau sind bereit, du bist dran" },
   done: { name: "Fertig", color: "GREEN", description: "Gemergt" },
   failed: { name: "Fehlgeschlagen", color: "RED", description: "Technisch hängen geblieben, Kommentar startet neuen Versuch" },
@@ -61,7 +66,7 @@ function loadConfig(): Config {
   return {
     label: "factory", maxParallel: 2, model: "opus", workflow: "starter-kit", pollSeconds: 60,
     jobTimeoutMinutes: 90, image: "software-factory-job:latest", dataDir: "/var/lib/software-factory",
-    containerMemory: "3g", maxChecks: 1, ...c,
+    containerMemory: "3g", maxChecks: 1, maxAccepts: 1, maxReworks: 2, ...c,
   };
 }
 
@@ -103,6 +108,16 @@ function lastFactoryMarker(issue: Issue): { status: string; phase?: Phase } | nu
     if (m) return { status: m[1], phase: m[2] as Phase | undefined };
   }
   return null;
+}
+
+/** Wie oft die Abnahme seit der letzten Freigabe bzw. dem letzten Review zurückgegeben hat. */
+function reworksSinceApproval(issue: Issue): number {
+  let n = 0;
+  for (const c of issue.comments) {
+    if (c.body.includes(`${MARK}approved:`) || c.body.includes(`${MARK}review:`)) n = 0;
+    else if (c.body.includes(`${MARK}rework:`)) n++;
+  }
+  return n;
 }
 
 /** Kommentare des Menschen nach dem letzten Kommentar der Factory. */
@@ -187,6 +202,7 @@ async function syncBoard(cfg: Config, url: string, status: string, step?: string
 
 const containerName = (repo: string, n: number) => `sf-${repo.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}-${n}`;
 const jobDir = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "jobs", `${repo.replace("/", "__")}__${n}`);
+const scenarioDir = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "scenarios", `${repo.replace("/", "__")}__${n}`);
 
 async function listContainers(): Promise<Container[]> {
   const names = (await docker(["ps", "-a", "--filter", "label=software-factory=1", "--format", "{{.Names}}"])).split("\n").filter(Boolean);
@@ -202,24 +218,28 @@ async function listContainers(): Promise<Container[]> {
   return result;
 }
 
-function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string): string {
+function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string): string {
   const modeText: Record<Mode, string> = {
     new: "Neuer Lauf",
     answer: "Fortsetzung nach einer Antwort des Menschen (siehe letzte Kommentare)",
     "change-request": `Änderungswunsch zum offenen PR ${prUrl ?? ""} (siehe letzte Kommentare). Arbeite auf demselben Branch weiter, keinen neuen PR öffnen.`,
     retry: "Erneuter Versuch nach einem Fehler (siehe letzte Kommentare für Hinweise)",
+    rework: `Rückgabe aus der Abnahme: Behebe die Befunde aus dem letzten Kommentar „Abnahme nicht bestanden" am offenen PR ${prUrl ?? ""}.`,
   };
   const comments = issue.comments.map((c) =>
     `### ${c.author.login} · ${c.createdAt}\n${c.body.replace(/<!-- software-factory:[\w:]+ -->\n?/g, "[Factory] ")}`).join("\n\n");
   const start = phase === "check"
-    ? `Phase **Prüfung**: Prüfe nur, baue nichts. Beginne mit \`factory-report checking "..."\` und ende mit approved, question oder rejected.`
-    : `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei einem Änderungswunsch direkt mit implementing).`;
+    ? `Phase **Prüfung**: Prüfe nur, entwickle nichts. Beginne mit \`factory-report checking "..."\` und ende mit approved (vorher Testszenarien nach /scenarios/scenarios.md), question oder rejected.`
+    : phase === "build"
+      ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
+      : `Phase **Abnahme**: Du bist der unabhängige Prüfer für den PR ${prUrl ?? ""}. Ende mit accepted oder rework.`;
   return [
     `# Auftrag`,
     `- Repo: ${repo}`, `- Issue: #${issue.number} (${issue.url})`, `- Branch: factory/${issue.number}`,
     `- Workflow: ${cfg.workflow} (Beschreibung: /factory/workflows/${cfg.workflow}/workflow.md)`,
-    `- Phase: ${phase === "check" ? "Prüfung" : "Bau"}`,
+    `- Phase: ${phase === "check" ? "Prüfung" : phase === "build" ? "Bau" : "Abnahme"}`,
     `- Modus: ${modeText[mode]}`,
+    ...(extra ? [`- ${extra}`] : []),
     ``, `## Issue: ${issue.title}`, ``, issue.body || "_(kein Text)_",
     ``, `## Verlauf`, ``, comments || "_(keine Kommentare)_",
     ``, `Folge dem Factory-Playbook aus deinem System-Prompt. ${start}`,
@@ -244,20 +264,25 @@ async function imageFor(cfg: Config, repo: string): Promise<string> {
   return tag;
 }
 
-async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string) {
+async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string) {
   const name = containerName(repo, issue.number);
   const dir = jobDir(cfg, repo, issue.number);
   mkdirSync(dir, { recursive: true });
   chownSync(dir, CONTAINER_UID, CONTAINER_UID);
   for (const f of ["status.json", "verify.json", "verify.md"]) rmSync(join(dir, f), { force: true });
-  writeFileSync(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl));
+  writeFileSync(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra));
   chownSync(join(dir, "prompt.md"), CONTAINER_UID, CONTAINER_UID);
 
   if (phase === "check" && !issue.comments.some((c) => c.body.includes(`${MARK}claimed`))) {
     await comment(repo, issue.number, "claimed",
       `🏭 Die Factory hat das Issue übernommen und prüft es jetzt. Den Fortschritt siehst du am Status (Label bzw. Board).`);
   }
-  const status = phase === "check" ? "checking" : "working";
+  const status = phase === "check" ? "checking" : phase === "build" ? "working" : "accepting";
+  // Testszenarien liegen außerhalb des Repos: Prüfung schreibt sie, Abnahme liest sie, der Bau sieht sie nie
+  const scen = scenarioDir(cfg, repo, issue.number);
+  mkdirSync(scen, { recursive: true });
+  chownSync(scen, CONTAINER_UID, CONTAINER_UID);
+  const scenarioMount = phase === "check" ? ["-v", `${scen}:/scenarios`] : phase === "accept" ? ["-v", `${scen}:/scenarios:ro`] : [];
   await setStage(repo, issue, status);
   await syncBoard(cfg, issue.url, status);
 
@@ -271,7 +296,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
     "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
-    "-v", `${dir}:/work`,
+    "-v", `${dir}:/work`, ...scenarioMount,
     await imageFor(cfg, repo),
   ], { GH_TOKEN: ghToken });
   log("job:started", { repo, issue: issue.number, phase, mode, container: name });
@@ -288,8 +313,12 @@ async function finish(cfg: Config, c: Container) {
     result = JSON.parse(lines[lines.length - 1]);
   } catch {}
 
-  const endStates = c.phase === "check" ? ["approved", "question", "rejected", "failed"] : ["review", "question", "failed"];
-  const ended = status.status && endStates.includes(status.status);
+  const endStates: Record<Phase, string[]> = {
+    check: ["approved", "question", "rejected", "failed"],
+    build: ["accepting", "question", "failed"],
+    accept: ["review", "working", "question", "failed"], // working = Rückgabe an die Entwicklung
+  };
+  const ended = status.status && endStates[c.phase].includes(status.status);
   log("job:finished", {
     repo: c.repo, issue: c.issue, phase: c.phase, exitCode: c.exitCode, status: status.status ?? null,
     minutes: result.duration_ms ? Math.round(result.duration_ms / 60000) : null,
@@ -420,6 +449,7 @@ async function tick(cfg: Config) {
   containers = (await listContainers()).filter((c) => c.running);
   let freeChecks = cfg.maxChecks - containers.filter((c) => c.phase === "check").length;
   let freeBuilds = cfg.maxParallel - containers.filter((c) => c.phase === "build").length;
+  let freeAccepts = cfg.maxAccepts - containers.filter((c) => c.phase === "accept").length;
 
   for (const repo of cfg.repos) {
     const issues: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
@@ -447,6 +477,7 @@ async function tick(cfg: Config) {
         await setStage(repo, issue, "done");
         await syncBoard(cfg, issue.url, "done");
         rmSync(jobDir(cfg, repo, issue.number), { recursive: true, force: true });
+        rmSync(scenarioDir(cfg, repo, issue.number), { recursive: true, force: true });
         log("job:done", { repo, issue: issue.number });
       }
     }
@@ -475,10 +506,15 @@ async function tick(cfg: Config) {
       if (current === "new") phase = "check";
       else if (current === "checking") { phase = "check"; mode = "retry"; }          // Prüf-Job verloren
       else if (current === "approved") phase = "build";
-      else if (current === "working") { phase = "build"; mode = "retry"; }           // Bau-Job verloren
-      else if (answered && current === "question") { phase = marker?.phase === "build" ? "build" : "check"; mode = "answer"; }
+      else if (current === "working") {
+        phase = "build";
+        mode = marker?.status === "rework" ? "rework" : "retry";                     // Rückgabe aus der Abnahme oder Job verloren
+        if (mode === "rework") prUrl = (await findPr(repo, issue.number, "open"))?.url;
+      }
+      else if (current === "accepting") { phase = "accept"; prUrl = (await findPr(repo, issue.number, "open"))?.url; }
+      else if (answered && current === "question") { phase = (marker?.phase as Phase) ?? "check"; mode = "answer"; }
       else if (answered && current === "rejected") { phase = "check"; mode = "answer"; }
-      else if (answered && current === "failed") { phase = marker?.phase === "check" ? "check" : "build"; mode = "retry"; }
+      else if (answered && current === "failed") { phase = (marker?.phase as Phase) ?? "build"; mode = "retry"; }
       else if (answered && current === "review") {
         prUrl = (await findPr(repo, issue.number, "open"))?.url;
         if (prUrl) { phase = "build"; mode = "change-request"; }
@@ -488,6 +524,14 @@ async function tick(cfg: Config) {
       // Prüfungen und Bau haben getrennte Plätze. Ohne freien Platz bleibt das Issue in seinem Status und kommt beim nächsten Durchlauf dran.
       if (phase === "check" && freeChecks > 0) { await launch(cfg, repo, issue, "check", mode); freeChecks--; }
       else if (phase === "build" && freeBuilds > 0) { await launch(cfg, repo, issue, "build", mode, prUrl); freeBuilds--; }
+      else if (phase === "accept" && freeAccepts > 0) {
+        if (!prUrl) prUrl = (await findPr(repo, issue.number, "open"))?.url;
+        const reworks = reworksSinceApproval(issue);
+        const last = reworks >= cfg.maxReworks;
+        await launch(cfg, repo, issue, "accept", mode, prUrl,
+          `Abnahme-Runde: ${reworks + 1}${last ? " (letzte Runde: keine Rückgabe mehr, offene Probleme als „Bitte genau prüfen“ melden)" : ""}`);
+        freeAccepts--;
+      }
     }
 
     await syncPreviews(cfg, repo, issues).catch((e) => log("preview:error", { repo, error: String(e) }));
