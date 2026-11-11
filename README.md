@@ -60,11 +60,11 @@ cd /opt/software-factory
 Danach:
 1. **Claude-Login:** auf deinem Rechner `claude setup-token` ausführen und den Token als `CLAUDE_CODE_OAUTH_TOKEN=...` in `/etc/software-factory/secrets.env` eintragen
 2. **GitHub-Login** auf dem Server: `gh auth login -s project`
-3. **Repo anbinden:** `./scripts/add-repo.sh dein-name/dein-repo`
+3. **Repo anbinden:** `./scripts/add-repo.sh dein-name/dein-repo`. Legt Labels an, trägt das Repo ein und erstellt beim ersten Mal das Kanban-Board. Für jedes weitere Repo erneut ausführen.
 4. `systemctl restart software-factory`
 5. Auf deinem Rechner: `./scripts/install-local-skills.sh`, dann `./scripts/new-project.sh mein-projekt` → Briefing in `docs/briefing.md` → `/init` → `/write-spec` → `/to-factory`
 
-Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger) folgt in `docs/`.
+Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger): [docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md).
 
 ## Messen und verbessern
 
@@ -103,6 +103,17 @@ Die Factory startet die **unveränderte, offizielle Claude Code CLI** auf deinem
 - Abo-Limits gelten für die Factory und deine normale Claude-Nutzung zusammen. Starte mit `maxParallel: 1–2`.
 - Für Teams oder wenn du die Factory als Dienst für andere betreibst: `ANTHROPIC_API_KEY` verwenden ([Legal and Compliance](https://code.claude.com/docs/en/legal-and-compliance)).
 - Stand: November 2026. Anthropic kann die Regeln ändern, prüf die verlinkte Doku.
+
+## Sicherheit und Grenzen (Version 0.1)
+
+- Jeder Lauf hat einen eigenen Container mit Speicher- und Prozesslimit. Standard: ein Agent-Lauf gleichzeitig (`maxParallel: 1`).
+- Antworten und Änderungswünsche nimmt die Factory nur von dir an (plus `allowedUsers`). Fremde Kommentare sieht der Agent nicht.
+- Ein Bau zählt nur, wenn `factory-verify` auf genau dem gepushten Commit grün ist und die Spec unverändert bleibt. Besteht die Abnahme nach zwei Runden nicht, landet der PR mit „Abnahme nicht bestanden“ bei dir, nie als bestanden.
+- Vorschauen laufen ohne Zugangsdaten, mit Passwort und mit Domain über HTTPS.
+- Die Agents arbeiten mit deinem GitHub-Login. Für mehr Trennung: eigener GitHub-Account für die Factory oder ein Fine-grained Token, der nur deine Factory-Repos erreicht.
+- Getestet: Ubuntu 24.04 auf Hostinger KVM 2, Next.js-Projekte. Weitere Stacks sind vorgesehen, aber noch nicht erprobt.
+
+Tests für den Runner: `node --test runner/main.test.ts` (Node 22.6+, ohne GitHub und Docker).
 
 ## Lizenz
 

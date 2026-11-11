@@ -34,6 +34,8 @@ git fetch --quiet origin
 DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
 if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
   git checkout --quiet -B "$BRANCH" "origin/$BRANCH"
+  # Die Abnahme startet immer mit genau dem gepushten Stand, ohne Reste früherer Läufe
+  if [ "$PHASE" = "accept" ]; then git reset --quiet --hard "origin/$BRANCH" && git clean -ffdxq; fi
 else
   git checkout --quiet -B "$BRANCH" "origin/$DEFAULT_BRANCH"
 fi

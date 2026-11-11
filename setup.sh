@@ -52,6 +52,7 @@ if jq -e '.preview.host == "AUTO" or .preview.password == "AUTO"' "$CONF_DIR/con
   TMP=$(mktemp)
   jq --arg ip "$IP" --arg pw "$PW" '.preview.host = (if .preview.host == "AUTO" then $ip else .preview.host end) | .preview.password = (if .preview.password == "AUTO" then $pw else .preview.password end)' "$CONF_DIR/config.json" > "$TMP" && mv "$TMP" "$CONF_DIR/config.json" && chmod 600 "$CONF_DIR/config.json"
   echo "  Vorschau: http://$IP:4001… · Login factory · Passwort in $CONF_DIR/config.json"
+  echo "  Für HTTPS (empfohlen): eine Subdomain auf $IP zeigen lassen und unter preview.domain eintragen (siehe Anleitung)"
 fi
 docker pull -q caddy:2-alpine >/dev/null
 
@@ -80,7 +81,7 @@ systemctl enable software-factory >/dev/null 2>&1
 MISSING=()
 grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.' "$CONF_DIR/secrets.env" || MISSING+=("Claude-Login: Token in $CONF_DIR/secrets.env (siehe Anleitung)")
 gh auth status >/dev/null 2>&1 || MISSING+=("GitHub-Login: gh auth login -s project")
-grep -q "DEIN-GITHUB-NAME" "$CONF_DIR/config.json" && MISSING+=("Repos eintragen: $CONF_DIR/config.json")
+jq -e '.repos | map(select(. != "DEIN-GITHUB-NAME/dein-repo")) | length > 0' "$CONF_DIR/config.json" >/dev/null || MISSING+=("Repo anbinden: ./scripts/add-repo.sh besitzer/repo")
 
 if [ ${#MISSING[@]} -eq 0 ]; then
   systemctl restart software-factory

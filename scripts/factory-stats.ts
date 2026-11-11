@@ -39,10 +39,10 @@ const usd = (x: number) => `${x.toFixed(2).replace(".", ",")} $`;
 const byPhase = (p: Run["phase"]) => runs.filter((r) => r.phase === p);
 const checks = byPhase("check"), builds = byPhase("build"), accepts = byPhase("accept");
 
-// Pro Aufgabe (Repo + Issue): reine Laufzeit aller Läufe, bis Review erreicht wurde
+// Pro Aufgabe (Repo + Issue): reine Laufzeit aller Läufe, bis Review erreicht wurde (mit oder ohne bestandene Abnahme)
 const tasks = new Map<string, Run[]>();
 for (const r of runs) tasks.set(`${r.repo}#${r.issue}`, [...(tasks.get(`${r.repo}#${r.issue}`) ?? []), r]);
-const finished = [...tasks.values()].filter((rs) => rs.some((r) => r.status === "review"));
+const finished = [...tasks.values()].filter((rs) => rs.some((r) => r.status === "review" || r.status === "unresolved"));
 const taskSeconds = finished.map((rs) => sum(rs.map((r) => r.seconds ?? 0)));
 
 // Abnahme: beim ersten Versuch bestanden?
@@ -56,7 +56,7 @@ const summary = {
   laufzeitProAufgabeSchnittSek: avg(taskSeconds),
   pruefung: { laeufe: checks.length, freigegeben: checks.filter((r) => r.status === "approved").length, rueckfrage: checks.filter((r) => r.status === "question").length, abgelehnt: checks.filter((r) => r.status === "rejected").length },
   entwicklung: { laeufe: builds.length, schnittSek: avg(builds.map((r) => r.seconds ?? 0)), schnittSchritte: avg(builds.map((r) => r.turns ?? 0)), aenderungswuensche: builds.filter((r) => r.mode === "change-request").length, rueckgabenAusAbnahme: builds.filter((r) => r.mode === "rework").length },
-  abnahme: { laeufe: accepts.length, bestanden: accepts.filter((r) => r.status === "review").length, zurueckgegeben: accepts.filter((r) => r.status === "working").length, beimErstenMalBestanden: firstPass, mitAbnahme: firstAccept.length },
+  abnahme: { laeufe: accepts.length, bestanden: accepts.filter((r) => r.status === "review").length, zurueckgegeben: accepts.filter((r) => r.status === "working").length, nichtBestandenMensch: accepts.filter((r) => r.status === "unresolved").length, beimErstenMalBestanden: firstPass, mitAbnahme: firstAccept.length },
   fehlgeschlagen: runs.filter((r) => r.status === "failed").length,
   kostenGegenwertUsd: sum(runs.map((r) => r.costUsd ?? 0)),
 };
@@ -78,5 +78,6 @@ console.log(`  davon Rückgaben Abnahme    ${summary.entwicklung.rueckgabenAusAb
 console.log(`\nAbnahme                      ${accepts.length} Läufe`);
 console.log(`  beim ersten Mal bestanden  ${firstPass} von ${firstAccept.length} (${pct(firstPass, firstAccept.length)})`);
 console.log(`  zurückgegeben              ${summary.abnahme.zurueckgegeben}`);
+console.log(`  nicht bestanden (du entsch.) ${summary.abnahme.nichtBestandenMensch}`);
 console.log(`\nFehlgeschlagen               ${summary.fehlgeschlagen}`);
 console.log(`Kosten-Gegenwert (API-Preis) ${usd(summary.kostenGegenwertUsd)}  · läuft über dein Abo, zählt gegen dessen Limits\n`);

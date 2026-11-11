@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Führt die Pflicht-Checks aus .factory/setup.json auf dem aktuellen Commit aus
 # und schreibt das Ergebnis nach /work/verify.json und /work/verify.md.
+# Der Runner akzeptiert einen Bau nur, wenn verify.json grün ist und zum gepushten Commit passt.
 #
 #   factory-verify            (im Repo-Ordner aufrufen, ohne uncommittete Änderungen)
 set -uo pipefail
 
-cd "${1:-/work/repo}"
+WORKDIR="${FACTORY_WORK:-/work}"
+cd "${1:-$WORKDIR/repo}"
 if [ -n "$(git status --porcelain)" ]; then
   echo "Es gibt uncommittete Änderungen. Erst committen und pushen, dann prüfen." >&2
   exit 2
@@ -15,21 +17,27 @@ if [ ! -f .factory/setup.json ]; then
   exit 2
 fi
 
+# Prüfvorgaben streng lesen: gültiges JSON und mindestens ein Check, sonst ist nichts geprüft
+if ! CHECKS=$(jq -er '.checks | select(type == "object") | to_entries | map(select((.value | type) == "string" and (.value | length) > 0)) | select(length > 0) | .[] | [.key, .value] | @tsv' .factory/setup.json 2>/dev/null); then
+  echo ".factory/setup.json ist ungültig oder enthält keine Checks (\"checks\": {\"name\": \"befehl\"}). Ohne Checks gilt nichts als geprüft." >&2
+  exit 2
+fi
+
 SHA=$(git rev-parse HEAD)
 RESULTS="[]"; FAILED=0
 MD="| Check | Befehl | Ergebnis |\n|---|---|---|\n"
 while IFS=$'\t' read -r NAME CMD; do
   [ -z "$NAME" ] && continue
   echo "▶ $NAME: $CMD"
-  OUT=$(bash -lc "$CMD" 2>&1); CODE=$?
+  OUT=$(bash -lc "$CMD" </dev/null 2>&1); CODE=$?
   TAIL=$(printf "%s" "$OUT" | tail -n 25)
   if [ $CODE -eq 0 ]; then echo "  ✓ bestanden"; ICON="✅"; else echo "  ✗ fehlgeschlagen (Exit $CODE)"; printf "%s\n" "$TAIL"; ICON="❌ Exit $CODE"; FAILED=1; fi
   MD+="| $NAME | \`$CMD\` | $ICON |\n"
   RESULTS=$(jq --arg n "$NAME" --arg c "$CMD" --argjson e $CODE --arg t "$TAIL" '. + [{name:$n, cmd:$c, exit:$e, tail:$t}]' <<<"$RESULTS")
-done < <(jq -r '.checks // {} | to_entries[] | [.key, .value] | @tsv' .factory/setup.json)
+done <<< "$CHECKS"
 
 jq -n --arg sha "$SHA" --argjson r "$RESULTS" --argjson ok $([ $FAILED -eq 0 ] && echo true || echo false) \
-  '{sha:$sha, ok:$ok, results:$r, at:(now|todate)}' > /work/verify.json
-printf "**Checks auf Commit \`%s\`**\n\n$MD" "${SHA:0:7}" > /work/verify.md
+  '{sha:$sha, ok:$ok, results:$r, at:(now|todate)}' > "$WORKDIR/verify.json"
+printf "**Checks auf Commit \`%s\`**\n\n$MD" "${SHA:0:7}" > "$WORKDIR/verify.md"
 echo; [ $FAILED -eq 0 ] && echo "Alle Checks bestanden auf ${SHA:0:7}." || echo "Mindestens ein Check ist fehlgeschlagen."
 exit $FAILED

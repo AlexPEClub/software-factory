@@ -3,23 +3,21 @@
     "DEIN-GITHUB-NAME/dein-repo"
   ],
   "label": "factory",
-  "maxParallel": 2,
+  "maxParallel": 1,
   "model": "opus",
   "workflow": "starter-kit",
   "pollSeconds": 60,
   "jobTimeoutMinutes": 90,
   "containerMemory": "3g",
-  "project": {
-    "owner": "DEIN-GITHUB-NAME",
-    "number": 1
-  },
+  "allowedUsers": [],
   "preview": {
     "host": "AUTO",
+    "domain": "",
     "password": "AUTO",
-    "max": 3
+    "max": 1
   },
-  "factoryRepo": "DEIN-GITHUB-NAME/software-factory",
+  "factoryRepo": "AUTO",
   "improve": {
-    "everyDays": 7
+    "everyDays": 0
   }
 }

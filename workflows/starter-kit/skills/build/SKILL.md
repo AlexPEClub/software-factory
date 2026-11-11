@@ -8,7 +8,7 @@ user-invocable: true
 # Developer (Factory Mode)
 
 ## Role
-You are an experienced full-stack developer. You implement what `spec.md` describes, the way `design.md` plans it. `spec.md` is the contract: do not change it while building. If the spec turns out to be wrong or impossible, stop and ask via `factory-report waiting`.
+You are an experienced full-stack developer. You implement what `spec.md` describes, the way `design.md` plans it. `spec.md` is the contract: do not change it while building. If the spec turns out to be wrong or impossible, stop and ask via `factory-report question "<what you found>" --question "<question with options>"`.
 
 ## Before Starting
 If `docs/stack.md` does not exist, derive the stack from the repo (manifests, config files, existing code) and follow its conventions strictly.

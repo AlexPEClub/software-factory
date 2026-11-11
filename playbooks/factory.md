@@ -67,7 +67,7 @@ Danach beendest du die Arbeit.
 3. **Tests:** `factory-report verifying "..."`
    - Skill `qa` → `qa-report.md` im Feature-Ordner (beim Bug: Ergebnis in den PR).
    - Bei sichtbaren Änderungen: Dev-Server starten (`.factory/setup.json` → `dev`), Screenshots mit `factory-screenshot`.
-   - Committen, pushen, dann `factory-verify`. Schlägt etwas fehl: zurück zur Umsetzung (maximal drei Runden).
+   - Committen, pushen, dann `factory-verify`. Schlägt etwas fehl: zurück zur Umsetzung (maximal drei Runden). Bleibt es rot: `factory-report failed "<was nicht grün wird und warum>"`.
 4. **Pull Request** gegen den Standard-Branch: `gh pr create --base "$FACTORY_DEFAULT_BRANCH" --head <branch> --title "<Typ>(<PROJ-ID oder #nummer>): <Titel>" --body-file <datei>`
    Der PR-Text enthält in dieser Reihenfolge:
    1. `Closes #<nummer>`
@@ -79,6 +79,7 @@ Danach beendest du die Arbeit.
    7. **Screenshots** (Ausgabe von `factory-screenshot`), falls es sichtbare Änderungen gibt
    8. **Einschätzung**: `Sicher` oder `Bitte genau prüfen` mit Begründung in 1–2 Sätzen
 5. `factory-report built "<Zusammenfassung in 1–2 Sätzen>" --pr <url>` und beenden. Danach prüft ein unabhängiger Agent dein Ergebnis.
+   Der Runner übernimmt `built` nur, wenn `factory-verify` grün war **auf genau dem gepushten Commit** und der PR die Spec nicht verändert. Nach jedem weiteren Commit also erneut `factory-verify`.
 
 **Ehrlich einschätzen:** `Sicher` nur, wenn du gebaut hast, was die Spec verlangt, alle Checks grün sind und du es selbst gesehen hast. Sonst `Bitte genau prüfen` und warum.
 
@@ -90,7 +91,7 @@ Taucht im Bau eine echte Unklarheit auf, die die Prüfung nicht gesehen hat: Rü
 
 Du bist ein **unabhängiger Prüfer**. Du hast nichts entwickelt und vertraust keiner Behauptung im PR-Text. Du prüfst nur, was du selbst siehst. **Kein Code ändern, keine Commits, kein Push.**
 
-Zwischenstände meldest du in dieser Phase nicht. Am Ende meldest du genau einmal `accepted` oder `rework`.
+Zwischenstände meldest du in dieser Phase nicht. Am Ende meldest du genau einmal `accepted`, `rework` oder (nur in der letzten Runde) `unresolved`.
 
 1. Lies die Spec (`spec.md` im Feature-Ordner) und die Testszenarien unter `/scenarios/scenarios.md`. Fehlen die Szenarien, leite sie selbst aus den Akzeptanzkriterien ab und vermerke das im Bericht.
 2. Du bist auf dem Branch des Pull Requests. Führe `factory-verify` aus.
@@ -100,7 +101,7 @@ Zwischenstände meldest du in dieser Phase nicht. Am Ende meldest du genau einma
 6. Entscheidung:
    - **Alle Szenarien bestanden, keine schweren Probleme** → `factory-report accepted "<1–2 Sätze>" --pr <url> --body-file <bericht>`
    - **Szenario nicht bestanden oder schweres Problem** → `factory-report rework "<1–2 Sätze>" --body-file <befunde>`. Die Befunde müssen ohne Rückfrage verständlich und nachstellbar sein.
-   - **Letzte Runde** (steht in der ersten Nachricht): keine Rückgabe mehr. Melde `accepted` und schreibe offene Probleme deutlich als „Bitte genau prüfen" in den Bericht.
+   - **Letzte Runde** (steht in der ersten Nachricht): keine Rückgabe mehr. Bestanden → `accepted`. Nicht bestanden → `factory-report unresolved "<1–2 Sätze>" --pr <url> --body-file <bericht>`. Dann entscheidet der Mensch. **Nie `accepted` melden, wenn ein Szenario nicht bestanden ist.**
 7. Beenden.
 
 ## Wiederaufnahme

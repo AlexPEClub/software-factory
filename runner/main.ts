@@ -3,12 +3,16 @@
 // startet pro Issue einen Docker-Container mit Claude Code und hält Labels und Board aktuell.
 // Er schreibt selbst nie Code. Das macht der Agent im Container.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chownSync } from "node:fs";
+import {
+  appendFileSync, closeSync, constants, existsSync, fchownSync, fstatSync, mkdirSync, openSync, readFileSync, readSync,
+  rmSync, statSync, writeFileSync, writeSync, chownSync,
+} from "node:fs";
 import { join } from "node:path";
 
-type Config = {
+export type Config = {
   repos: string[];
   label: string;
+  /** Wie viele Agent-Läufe gleichzeitig, über alle Phasen und Repos (Prüfung, Bau, Abnahme, Verbesserung) */
   maxParallel: number;
   model: string;
   workflow: string;
@@ -17,22 +21,20 @@ type Config = {
   image: string;
   dataDir: string;
   containerMemory: string;
-  /** Wie viele Prüf-Läufe gleichzeitig (zusätzlich zu den Bau-Läufen) */
-  maxChecks: number;
-  /** Wie viele Abnahme-Läufe gleichzeitig */
-  maxAccepts: number;
-  /** Wie oft die Abnahme zurück in die Entwicklung geben darf, bevor sie mit Hinweis durchwinkt */
+  /** Wie oft die Abnahme zurück in die Entwicklung geben darf. Danach entscheidet der Mensch. */
   maxReworks: number;
+  /** GitHub-Nutzer, deren Kommentare die Factory als Antwort oder Änderungswunsch annimmt (zusätzlich zum eigenen Login) */
+  allowedUsers?: string[];
   project?: { owner: string; number: number };
   /** Factory-Repo, in dem der Verbesserungs-Lauf Vorschläge als Pull Request öffnet */
   factoryRepo?: string;
-  /** Verbesserungs-Lauf automatisch alle X Tage (zusätzlich zu `factory-improve`) */
+  /** Verbesserungs-Lauf automatisch alle X Tage (zusätzlich zu `factory-improve`). Standard: aus */
   improve?: { everyDays?: number };
-  /** Vorschau pro PR: http://<host>:<4000+slot>, mit Passwortschutz (Nutzer "factory") */
-  preview?: { host: string; password: string; max?: number; memory?: string };
+  /** Vorschau pro PR mit Passwortschutz (Nutzer "factory"). Mit domain über HTTPS, sonst http://<host>:<4000+slot> */
+  preview?: { host: string; domain?: string; password: string; max?: number; memory?: string };
 };
 
-type Comment = { author: { login: string }; body: string; createdAt: string };
+type Comment = { author: { login: string } | null; body: string; createdAt: string };
 type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
 type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
 type Phase = "check" | "build" | "accept";
@@ -60,34 +62,96 @@ const LEGACY: Record<string, string> = {
   verifying: "working", pr: "review", waiting: "question",
 };
 let CONTAINER_UID = 1001; // Nutzer im Job-Image, wird beim Start aus dem Image gelesen
+/** GitHub-Login, unter dem die Factory kommentiert. Nur Marker dieses Logins zählen als Factory-Zustand. */
+let FACTORY_LOGIN = "";
+export const setFactoryLogin = (login: string) => { FACTORY_LOGIN = login; };
 
 function log(event: string, data: Record<string, unknown> = {}) {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...data }));
 }
 
-function loadConfig(): Config {
-  const c = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+export function loadConfig(path = CONFIG_PATH): Config {
+  const c = JSON.parse(readFileSync(path, "utf8"));
   return {
-    label: "factory", maxParallel: 2, model: "opus", workflow: "starter-kit", pollSeconds: 60,
+    label: "factory", maxParallel: 1, model: "opus", workflow: "starter-kit", pollSeconds: 60,
     jobTimeoutMinutes: 90, image: "software-factory-job:latest", dataDir: "/var/lib/software-factory",
-    containerMemory: "3g", maxChecks: 1, maxAccepts: 1, maxReworks: 2, ...c,
+    containerMemory: "3g", maxReworks: 2, ...c,
   };
 }
 
-async function run(cmd: string[], opts: { input?: string; env?: Record<string, string> } = {}): Promise<string> {
+async function run(cmd: string[], opts: { input?: string; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<string> {
   const proc = Bun.spawn(cmd, {
     stdin: opts.input !== undefined ? new Blob([opts.input]) : "ignore",
     stdout: "pipe", stderr: "pipe",
     env: { ...process.env, ...opts.env },
   });
+  // Kein Aufruf darf den Runner dauerhaft blockieren
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; proc.kill(); }, opts.timeoutMs ?? 5 * 60_000);
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-  ]);
+  ]).finally(() => clearTimeout(timer));
+  if (timedOut) throw new Error(`${cmd.slice(0, 3).join(" ")}: Zeitlimit überschritten`);
   if (code !== 0) throw new Error(`${cmd.slice(0, 3).join(" ")}: ${err.trim() || out.trim()}`);
   return out;
 }
 const gh = (args: string[], input?: string) => run(["gh", ...args], { input });
-const docker = (args: string[], env?: Record<string, string>) => run(["docker", ...args], { env });
+const docker = (args: string[], env?: Record<string, string>, timeoutMs?: number) => run(["docker", ...args], { env, timeoutMs });
+
+// ---------- Dateien aus Job-Ordnern ----------
+// Der Container kann in seinem Job-Ordner beliebige Dateien anlegen, auch Symlinks auf Dateien des Servers.
+// Der Runner läuft als root: Er liest und schreibt dort deshalb nur normale Dateien und folgt keinen Links.
+
+/** Liest eine normale Datei (keine Symlinks, keine Geräte oder Pipes). Bei großen Dateien das Ende. */
+export function readJobFile(path: string, maxBytes = 1_000_000): string | null {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { return null; }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return null;
+    const len = Math.min(st.size, maxBytes);
+    const start = st.size - len;
+    const buf = Buffer.alloc(len);
+    let off = 0;
+    while (off < len) {
+      const n = readSync(fd, buf, off, len - off, start + off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return buf.subarray(0, off).toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+/** Legt eine Datei neu an (ein vorhandener Link wird entfernt, nicht verfolgt) und übergibt sie dem Container-Nutzer. */
+export function writeJobFile(path: string, content: string, uid = CONTAINER_UID, gid = uid) {
+  rmSync(path, { force: true });
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+  try { writeSync(fd, content); fchownSync(fd, uid, gid); } finally { closeSync(fd); }
+}
+
+const readJobJson = (path: string, maxBytes = 200_000): any => {
+  try { return JSON.parse(readJobFile(path, maxBytes) ?? ""); } catch { return null; }
+};
+
+/** Entfernt Zugangsdaten aus Texten, bevor sie öffentlich in GitHub landen. */
+export function redact(text: string): string {
+  return text
+    .replace(/sk-ant-[A-Za-z0-9_-]+/g, "[Zugangsdaten entfernt]")
+    .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[Zugangsdaten entfernt]")
+    .replace(/(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|GH_TOKEN|GITHUB_TOKEN)=\S+/g, "$1=[entfernt]");
+}
+
+// ---------- Dauerhafter Zustand pro Issue (nur für den Runner) ----------
+
+type IssueState = { lostRetries?: number };
+const stateFile = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "state", `${repo.replace("/", "__")}__${n}.json`);
+function getState(cfg: Config, repo: string, n: number): IssueState {
+  try { return JSON.parse(readFileSync(stateFile(cfg, repo, n), "utf8")); } catch { return {}; }
+}
+function setState(cfg: Config, repo: string, n: number, s: IssueState) {
+  mkdirSync(join(cfg.dataDir, "state"), { recursive: true });
+  writeFileSync(stateFile(cfg, repo, n), JSON.stringify(s));
+}
 
 // ---------- GitHub ----------
 
@@ -105,9 +169,17 @@ async function comment(repo: string, n: number, stage: string, text: string) {
   await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], `${MARK}${stage} -->\n${text}`);
 }
 
+const loginOf = (c: Comment) => c.author?.login ?? "";
+/** Kommentar der Factory selbst: Marker zählen nur, wenn sie vom Login der Factory stammen. */
+export const isFactoryComment = (c: Comment) => !!FACTORY_LOGIN && loginOf(c) === FACTORY_LOGIN && c.body.includes(MARK);
+/** Darf diese Person der Factory antworten oder Änderungen wünschen? */
+export const isTrusted = (cfg: Config, login: string) =>
+  !!login && (login === FACTORY_LOGIN || (cfg.allowedUsers ?? []).some((u) => u.toLowerCase() === login.toLowerCase()));
+
 /** Letzter Kommentar der Factory: Status und Phase aus dem Marker. */
-function lastFactoryMarker(issue: Issue): { status: string; phase?: Phase } | null {
+export function lastFactoryMarker(issue: Issue): { status: string; phase?: Phase } | null {
   for (let i = issue.comments.length - 1; i >= 0; i--) {
+    if (!isFactoryComment(issue.comments[i])) continue;
     const m = issue.comments[i].body.match(/<!-- software-factory:(\w+)(?::(\w+))? -->/);
     if (m) return { status: m[1], phase: m[2] as Phase | undefined };
   }
@@ -115,20 +187,20 @@ function lastFactoryMarker(issue: Issue): { status: string; phase?: Phase } | nu
 }
 
 /** Wie oft die Abnahme seit der letzten Freigabe bzw. dem letzten Review zurückgegeben hat. */
-function reworksSinceApproval(issue: Issue): number {
+export function reworksSinceApproval(issue: Issue): number {
   let n = 0;
-  for (const c of issue.comments) {
+  for (const c of issue.comments.filter(isFactoryComment)) {
     if (c.body.includes(`${MARK}approved:`) || c.body.includes(`${MARK}review:`)) n = 0;
     else if (c.body.includes(`${MARK}rework:`)) n++;
   }
   return n;
 }
 
-/** Kommentare des Menschen nach dem letzten Kommentar der Factory. */
-function humanCommentsSinceFactory(issue: Issue): Comment[] {
+/** Kommentare berechtigter Menschen nach dem letzten Kommentar der Factory. */
+export function humanCommentsSinceFactory(cfg: Config, issue: Issue): Comment[] {
   let last = -1;
-  issue.comments.forEach((c, i) => { if (c.body.includes(MARK)) last = i; });
-  return issue.comments.slice(last + 1).filter((c) => !c.body.includes(MARK));
+  issue.comments.forEach((c, i) => { if (isFactoryComment(c)) last = i; });
+  return issue.comments.slice(last + 1).filter((c) => !c.body.includes(MARK) && isTrusted(cfg, loginOf(c)));
 }
 
 async function findPr(repo: string, n: number, state: "open" | "merged" | "all") {
@@ -207,6 +279,7 @@ async function syncBoard(cfg: Config, url: string, status: string, step?: string
 const containerName = (repo: string, n: number) => `sf-${repo.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}-${n}`;
 const jobDir = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "jobs", `${repo.replace("/", "__")}__${n}`);
 const scenarioDir = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "scenarios", `${repo.replace("/", "__")}__${n}`);
+const agentLimits = (cfg: Config) => ["--memory", cfg.containerMemory, "--memory-swap", cfg.containerMemory, "--pids-limit", "4096", "--shm-size", "1g"];
 
 async function listContainers(): Promise<Container[]> {
   const names = (await docker(["ps", "-a", "--filter", "label=software-factory=1", "--format", "{{.Names}}"])).split("\n").filter(Boolean);
@@ -224,7 +297,7 @@ async function listContainers(): Promise<Container[]> {
   return result;
 }
 
-function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string): string {
+export function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string): string {
   const modeText: Record<Mode, string> = {
     new: "Neuer Lauf",
     answer: "Fortsetzung nach einer Antwort des Menschen (siehe letzte Kommentare)",
@@ -232,13 +305,18 @@ function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode
     retry: "Erneuter Versuch nach einem Fehler (siehe letzte Kommentare für Hinweise)",
     rework: `Rückgabe aus der Abnahme: Behebe die Befunde aus dem letzten Kommentar „Abnahme nicht bestanden" am offenen PR ${prUrl ?? ""}.`,
   };
-  const comments = issue.comments.map((c) =>
-    `### ${c.author.login} · ${c.createdAt}\n${c.body.replace(/<!-- software-factory:[\w:]+ -->\n?/g, "[Factory] ")}`).join("\n\n");
+  // Kommentare von nicht berechtigten Personen bekommt der Agent nicht zu sehen
+  const comments = issue.comments.map((c) => {
+    const who = loginOf(c) || "unbekannt";
+    if (isFactoryComment(c)) return `### Factory · ${c.createdAt}\n${c.body.replace(/<!-- software-factory:[\w:]+ -->\n?/g, "")}`;
+    if (!isTrusted(cfg, who)) return `### ${who} · ${c.createdAt}\n_(Kommentar ausgeblendet: ${who} ist für die Factory nicht berechtigt. Nicht beachten.)_`;
+    return `### ${who} · ${c.createdAt}\n${c.body.replace(/<!-- software-factory:[\w:]+ -->\n?/g, "")}`;
+  }).join("\n\n");
   const start = phase === "check"
     ? `Phase **Prüfung**: Prüfe nur, entwickle nichts. Beginne mit \`factory-report checking "..."\` und ende mit approved (vorher Testszenarien nach /scenarios/scenarios.md), question oder rejected.`
     : phase === "build"
       ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
-      : `Phase **Abnahme**: Du bist der unabhängige Prüfer für den PR ${prUrl ?? ""}. Ende mit accepted oder rework.`;
+      : `Phase **Abnahme**: Du bist der unabhängige Prüfer für den PR ${prUrl ?? ""}. Ende mit accepted, rework oder (nur in der letzten Runde) unresolved.`;
   return [
     `# Auftrag`,
     `- Repo: ${repo}`, `- Issue: #${issue.number} (${issue.url})`, `- Branch: factory/${issue.number}`,
@@ -264,7 +342,7 @@ async function imageFor(cfg: Config, repo: string): Promise<string> {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "Dockerfile"), Buffer.from(file.content, "base64").toString("utf8"));
     log("image:building", { repo, tag });
-    await docker(["build", "-q", "-t", tag, dir]);
+    await docker(["build", "-q", "-t", tag, dir], undefined, 45 * 60_000);
     log("image:built", { repo, tag });
   }
   return tag;
@@ -276,10 +354,9 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
   mkdirSync(dir, { recursive: true });
   chownSync(dir, CONTAINER_UID, CONTAINER_UID);
   for (const f of ["status.json", "verify.json", "verify.md"]) rmSync(join(dir, f), { force: true });
-  writeFileSync(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra));
-  chownSync(join(dir, "prompt.md"), CONTAINER_UID, CONTAINER_UID);
+  writeJobFile(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra));
 
-  if (phase === "check" && !issue.comments.some((c) => c.body.includes(`${MARK}claimed`))) {
+  if (phase === "check" && !issue.comments.some((c) => isFactoryComment(c) && c.body.includes(`${MARK}claimed`))) {
     await comment(repo, issue.number, "claimed",
       `🏭 Die Factory hat das Issue übernommen und prüft es jetzt. Den Fortschritt siehst du am Status (Label bzw. Board).`);
   }
@@ -298,7 +375,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
   await docker([
     "run", "-d", "--name", name,
     "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`, "--label", `sf.mode=${mode}`,
-    "--memory", cfg.containerMemory, "--shm-size", "1g",
+    ...agentLimits(cfg),
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
     "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
@@ -308,38 +385,60 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
   log("job:started", { repo, issue: issue.number, phase, mode, container: name });
 }
 
-/** Wertet einen beendeten Container aus und räumt ihn weg. */
-async function finish(cfg: Config, c: Container) {
+/** Nach einem Bau-Lauf: Sind die Pflicht-Checks auf genau dem gepushten Stand grün und ist die Spec unverändert? */
+async function checkBuild(repo: string, issue: number, dir: string, prUrl?: string): Promise<string | null> {
+  const verify = readJobJson(join(dir, "verify.json"));
+  if (!verify || verify.ok !== true || !Array.isArray(verify.results) || verify.results.length === 0) {
+    return "Die Pflicht-Checks wurden nicht ausgeführt oder sind nicht grün (`factory-verify`).";
+  }
+  let head = "";
+  try { head = (await gh(["api", `repos/${repo}/git/ref/heads/factory/${issue}`, "--jq", ".object.sha"])).trim(); } catch {}
+  if (!head) return `Der Branch \`factory/${issue}\` wurde nicht gepusht.`;
+  if (verify.sha !== head) return `Die Checks liefen auf \`${String(verify.sha).slice(0, 7)}\`, gepusht ist aber \`${head.slice(0, 7)}\`. Nach dem letzten Commit muss \`factory-verify\` erneut laufen.`;
+  if (prUrl) {
+    try {
+      const files = (await gh(["pr", "diff", prUrl, "--name-only"])).split("\n");
+      const spec = files.find((f) => /^features\/[^/]+\/spec\.md$/.test(f.trim()));
+      if (spec) return `Der Pull Request ändert die Spec \`${spec.trim()}\`. Die Spec ist der Vertrag und darf nur vom Menschen geändert werden.`;
+    } catch {}
+  }
+  return null;
+}
+
+/** Wertet einen beendeten Container aus und räumt ihn weg. `reason` = Grund, warum der Runner ihn beendet hat. */
+async function finish(cfg: Config, c: Container, reason?: string) {
   const dir = jobDir(cfg, c.repo, c.issue);
-  let status: { status?: string; step?: string; pr?: string } = {};
-  try { status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8")); } catch {}
+  const status: { status?: string; step?: string; pr?: string; unresolved?: boolean } = readJobJson(join(dir, "status.json")) ?? {};
   let result: any = {};
-  try {
-    const lines = readFileSync(join(dir, "claude.jsonl"), "utf8").trim().split("\n");
-    result = JSON.parse(lines[lines.length - 1]);
-  } catch {}
+  const tail = readJobFile(join(dir, "claude.jsonl"), 500_000) ?? "";
+  try { result = JSON.parse(tail.trim().split("\n").pop() ?? ""); } catch {}
 
   const endStates: Record<Phase, string[]> = {
     check: ["approved", "question", "rejected", "failed"],
     build: ["accepting", "question", "failed"],
     accept: ["review", "working", "question", "failed"], // working = Rückgabe an die Entwicklung
   };
-  const ended = status.status && endStates[c.phase].includes(status.status);
+  let problem = reason ?? null;
+  if (!problem && !(status.status && endStates[c.phase].includes(status.status))) problem = "Der Lauf hat kein Ergebnis gemeldet.";
+  if (!problem && (c.exitCode !== 0 || result.is_error)) problem = `Claude Code wurde mit einem Fehler beendet (Exit-Code ${c.exitCode}).`;
+  if (!problem && c.phase === "build" && status.status === "accepting") problem = await checkBuild(c.repo, c.issue, dir, status.pr);
+  const ended = !problem;
+  const metricStatus = ended ? (status.status === "review" && status.unresolved ? "unresolved" : status.status) : "failed";
+
   log("job:finished", {
-    repo: c.repo, issue: c.issue, phase: c.phase, exitCode: c.exitCode, status: status.status ?? null,
+    repo: c.repo, issue: c.issue, phase: c.phase, exitCode: c.exitCode, status: metricStatus, problem,
     minutes: result.duration_ms ? Math.round(result.duration_ms / 60000) : null,
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null,
   });
+  const errTail = redact(readJobFile(join(dir, "claude.err"), 1500) ?? "");
   // Kurze Zusammenfassung des Laufs dauerhaft festhalten: Grundlage für den Verbesserungs-Lauf
   try {
     const runsDir = join(cfg.dataDir, "runs");
     mkdirSync(runsDir, { recursive: true });
-    let errTail = "";
-    try { errTail = readFileSync(join(dir, "claude.err"), "utf8").slice(-1500); } catch {}
     writeFileSync(join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}__${c.repo.replace("/", "__")}__${c.issue}__${c.phase}.json`), JSON.stringify({
       repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode, exitCode: c.exitCode,
-      status: ended ? status.status : "failed", reported: status,
-      result: typeof result.result === "string" ? result.result.slice(0, 4000) : null,
+      status: metricStatus, problem, reported: status,
+      result: typeof result.result === "string" ? redact(result.result.slice(0, 4000)) : null,
       turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, errTail,
     }, null, 2));
   } catch (e) { log("runs:error", { error: String(e) }); }
@@ -347,20 +446,22 @@ async function finish(cfg: Config, c: Container) {
   const seconds = Math.max(0, Math.round((Date.parse(c.finishedAt) - Date.parse(c.startedAt)) / 1000));
   appendFileSync(join(cfg.dataDir, "metrics.jsonl"), JSON.stringify({
     t: new Date().toISOString(), repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode,
-    status: ended ? status.status : "failed", exitCode: c.exitCode, seconds: Number.isFinite(seconds) ? seconds : null,
+    status: metricStatus, exitCode: c.exitCode, seconds: Number.isFinite(seconds) ? seconds : null,
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, model: cfg.model,
   }) + "\n");
 
-  if (!ended) {
-    let reason = typeof result.result === "string" ? result.result.slice(0, 1500) : "";
-    if (!reason) {
-      try { reason = readFileSync(join(dir, "claude.err"), "utf8").slice(-1500); } catch {}
-    }
+  if (ended) {
+    setState(cfg, c.repo, c.issue, {});
+  } else {
+    let detail = typeof result.result === "string" ? result.result.slice(-1500) : "";
+    if (!detail) detail = errTail.slice(-800);
+    detail = redact(detail).replace(/```/g, "'''").trim();
     const issue = JSON.parse(await gh(["issue", "view", String(c.issue), "-R", c.repo, "--json", "number,title,body,url,labels,comments"]));
     await setStage(c.repo, issue, "failed");
+    await syncBoard(cfg, issue.url, "failed");
     await comment(c.repo, c.issue, `failed:${c.phase}`,
-      `### ⚠️ Der Lauf wurde ohne Ergebnis beendet (Exit-Code ${c.exitCode})\n\n` +
-      (reason ? "```\n" + reason.trim() + "\n```\n\n" : "") +
+      `### ⚠️ Der Lauf wurde ohne gültiges Ergebnis beendet\n\n**Grund:** ${problem}\n\n` +
+      (detail ? "Letzte Ausgabe:\n```\n" + detail + "\n```\n\n" : "") +
       `_Schreib einen Kommentar mit einem Hinweis, dann versucht die Factory es erneut._`);
   }
   await docker(["rm", "-f", c.name]).catch(() => {});
@@ -372,6 +473,7 @@ const CADDYFILE = "/etc/software-factory/Caddyfile";
 const PREVIEW_PORT = (slot: number) => 4000 + slot; // von außen erreichbar (mit Passwort)
 const INTERNAL_PORT = (slot: number) => 5000 + slot; // nur lokal, dahinter läuft die App
 let caddyHash: string | null = null;
+let caddyFresh = false; // Caddy einmal pro Runner-Start neu aufsetzen (Konfiguration kann sich geändert haben)
 const previewNoticePosted = new Set<string>();
 
 type Preview = { name: string; repo: string; issue: number; sha: string; slot: number; running: boolean };
@@ -387,26 +489,41 @@ async function listPreviews(): Promise<Preview[]> {
   return result;
 }
 
+export const previewLink = (cfg: Config, slot: number) =>
+  cfg.preview?.domain ? `https://${cfg.preview.domain}:${PREVIEW_PORT(slot)}` : `http://${cfg.preview?.host}:${PREVIEW_PORT(slot)}`;
+
+export function caddyConfig(cfg: Config, slots: number[], hash: string): string {
+  const domain = cfg.preview?.domain;
+  // Mit Domain holt Caddy selbst ein Zertifikat (Ports 80 und 443 müssen erreichbar sein). Ohne Domain nur HTTP.
+  const global = domain ? `{\n  admin localhost:2019\n}` : `{\n  auto_https off\n  admin localhost:2019\n}`;
+  const blocks = slots.map((slot) =>
+    `${domain ? `${domain}:${PREVIEW_PORT(slot)}` : `:${PREVIEW_PORT(slot)}`} {\n  basic_auth {\n    factory ${hash}\n  }\n  reverse_proxy 127.0.0.1:${INTERNAL_PORT(slot)}\n}`);
+  if (domain) blocks.unshift(`${domain} {\n  respond "Software Factory: Vorschauen laufen auf eigenen Ports." 200\n}`);
+  return `${global}\n\n${blocks.join("\n\n")}\n`;
+}
+
 async function writeCaddy(cfg: Config, previews: Preview[]) {
   if (!cfg.preview) return;
   if (!caddyHash) caddyHash = (await docker(["run", "--rm", "caddy:2-alpine", "caddy", "hash-password", "--plaintext", cfg.preview.password])).trim();
-  const blocks = previews.map((p) =>
-    `:${PREVIEW_PORT(p.slot)} {\n  basic_auth {\n    factory ${caddyHash}\n  }\n  reverse_proxy 127.0.0.1:${INTERNAL_PORT(p.slot)}\n}`);
-  writeFileSync(CADDYFILE, `{\n  auto_https off\n  admin localhost:2019\n}\n\n${blocks.join("\n\n")}\n`);
+  writeFileSync(CADDYFILE, caddyConfig(cfg, previews.map((p) => p.slot), caddyHash));
   const running = (await docker(["ps", "--filter", "name=^sf-caddy$", "--format", "{{.Names}}"])).trim();
-  if (!running) {
+  if (!running || !caddyFresh) {
     await docker(["rm", "-f", "sf-caddy"]).catch(() => {});
+    // Zertifikate liegen im Volume sf-caddy-data und überleben Neustarts
     await docker(["run", "-d", "--name", "sf-caddy", "--network", "host", "--restart", "unless-stopped",
-      "-v", `${CADDYFILE}:/etc/caddy/Caddyfile:ro`, "caddy:2-alpine"]);
+      "-v", `${CADDYFILE}:/etc/caddy/Caddyfile:ro`, "-v", "sf-caddy-data:/data", "caddy:2-alpine"]);
+    caddyFresh = true;
   } else {
     await docker(["exec", "sf-caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]);
   }
 }
 
+const previewDir = (cfg: Config, name: string) => join(cfg.dataDir, "previews", name);
+
 /** Startet/aktualisiert Vorschauen für offene Factory-PRs und räumt alte weg. */
 async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
   if (!cfg.preview) return;
-  const max = cfg.preview.max ?? 3;
+  const max = cfg.preview.max ?? 1;
   let previews = (await listPreviews()).filter((p) => p.repo === repo);
   const wanted = new Map<number, { url: string; number: number; sha: string }>();
   for (const issue of issues.filter((i) => stageOf(i) === "review")) {
@@ -414,12 +531,13 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
     if (pr) wanted.set(issue.number, { url: pr.url, number: pr.number, sha: pr.headRefOid });
   }
 
-  let changed = false;
+  let changed = !caddyFresh;
   // Weg mit Vorschauen ohne offenen PR, mit altem Stand oder abgestürzt
   for (const p of previews) {
     const w = wanted.get(p.issue);
     if (!w || w.sha !== p.sha || !p.running) {
       await docker(["rm", "-f", p.name]).catch(() => {});
+      rmSync(previewDir(cfg, p.name), { recursive: true, force: true });
       log("preview:stopped", { repo, issue: p.issue, reason: !w ? "kein offener PR" : w.sha !== p.sha ? "neuer Stand" : "abgestürzt" });
       changed = true;
     }
@@ -433,22 +551,34 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
     const slot = Array.from({ length: max }, (_, i) => i + 1).find((s) => !usedSlots.has(s));
     if (!slot) { log("preview:no-slot", { repo, issue: issueNr }); continue; }
     usedSlots.add(slot);
-    const ghToken = (await gh(["auth", "token"])).trim();
     const name = `sf-preview-${repo.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}-${issueNr}`;
+    const image = await imageFor(cfg, repo);
+
+    // 1. Quellcode in einem kurzen Container mit GitHub-Zugang holen …
+    const src = previewDir(cfg, name);
+    rmSync(src, { recursive: true, force: true });
+    mkdirSync(src, { recursive: true });
+    chownSync(src, CONTAINER_UID, CONTAINER_UID);
+    const ghToken = (await gh(["auth", "token"])).trim();
+    await docker(["run", "--rm", "-e", `REPO=${repo}`, "-e", `BRANCH=factory/${issueNr}`, "-e", "GH_TOKEN",
+      "-v", `${src}:/src`, "--entrypoint", "bash", image, "-c",
+      `gh auth setup-git >/dev/null && gh repo clone "$REPO" /src/app -- --quiet --depth 1 --branch "$BRANCH"`], { GH_TOKEN: ghToken });
+
+    // 2. … und die App ohne jegliche Zugangsdaten starten
     await docker(["run", "-d", "--name", name,
       "--label", "sf.preview=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issueNr}`,
       "--label", `sf.sha=${pr.sha}`, "--label", `sf.slot=${slot}`,
-      "-p", `127.0.0.1:${INTERNAL_PORT(slot)}:3000`, "--memory", cfg.preview.memory ?? "1500m",
-      "-e", `REPO=${repo}`, "-e", `BRANCH=factory/${issueNr}`, "-e", "GH_TOKEN",
-      "--entrypoint", "/factory/preview.sh", await imageFor(cfg, repo)], { GH_TOKEN: ghToken });
+      "-p", `127.0.0.1:${INTERNAL_PORT(slot)}:3000`,
+      "--memory", cfg.preview.memory ?? "1500m", "--pids-limit", "2048",
+      "-v", `${src}/app:/app`, "--entrypoint", "/factory/preview.sh", image]);
     changed = true;
-    const link = `http://${cfg.preview.host}:${PREVIEW_PORT(slot)}`;
+    const link = previewLink(cfg, slot);
     log("preview:started", { repo, issue: issueNr, pr: pr.number, url: link });
 
     const key = `${repo}#${pr.number}`;
     if (!previewNoticePosted.has(key)) {
       const comments = JSON.parse(await gh(["pr", "view", String(pr.number), "-R", repo, "--json", "comments"])).comments as Comment[];
-      if (!comments.some((c) => c.body.includes(`${MARK}preview -->`))) {
+      if (!comments.some((c) => isFactoryComment(c) && c.body.includes(`${MARK}preview -->`))) {
         await gh(["pr", "comment", String(pr.number), "-R", repo, "--body-file", "-"],
           `${MARK}preview -->\n### 🔍 Vorschau zum Durchklicken\n\n${link}\n\nLogin: \`factory\` · Passwort: steht in \`/etc/software-factory/config.json\` auf dem Server.\n\n_Die Vorschau braucht nach jedem neuen Stand 1–2 Minuten zum Starten. Nach Merge oder Schließen des PRs wird sie entfernt._`);
       }
@@ -461,18 +591,30 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
 // ---------- Verbesserungs-Lauf ----------
 // Wertet alle bisherigen Läufe aus und schlägt Änderungen an Playbook/Skills als PR im Factory-Repo vor.
 // Auslöser: `factory-improve` (legt eine Anforderungs-Datei an) oder automatisch alle improve.everyDays Tage.
+// Belegt einen Agent-Platz wie jeder andere Lauf.
 
-async function maybeImprove(cfg: Config) {
-  const requested = join(cfg.dataDir, "improve-requested");
-  const lastRun = join(cfg.dataDir, "improve-last");
-  const lines = (await docker(["ps", "-a", "--filter", "label=sf.improve=1", "--format", "{{.Names}}|{{.State}}"])).trim().split("\n").filter(Boolean);
+async function improveRunning(cfg: Config): Promise<boolean> {
+  const lines = (await docker(["ps", "-a", "--filter", "label=sf.improve=1", "--format", "{{.Names}}|{{.State}}|{{.RunningFor}}"])).trim().split("\n").filter(Boolean);
+  let running = false;
   for (const line of lines) {
     const [name, state] = line.split("|");
-    if (state === "running") return;
+    if (state === "running") {
+      const started = JSON.parse(await docker(["inspect", name]))[0].State.StartedAt;
+      if ((Date.now() - Date.parse(started)) / 60000 <= cfg.jobTimeoutMinutes) { running = true; continue; }
+      log("improve:timeout", { container: name });
+      await docker(["kill", name]).catch(() => {});
+    }
     const out = await docker(["logs", "--tail", "5", name]).catch(() => "");
-    log("improve:finished", { container: name, tail: out.trim().slice(-600) });
+    log("improve:finished", { container: name, tail: redact(out.trim().slice(-600)) });
     await docker(["rm", "-f", name]).catch(() => {});
   }
+  return running;
+}
+
+async function maybeImprove(cfg: Config, freeSlots: number) {
+  if (freeSlots <= 0) return;
+  const requested = join(cfg.dataDir, "improve-requested");
+  const lastRun = join(cfg.dataDir, "improve-last");
   const days = cfg.improve?.everyDays;
   const due = !!days && (!existsSync(lastRun) || Date.now() - statSync(lastRun).mtimeMs > days * 86400000);
   if (!existsSync(requested) && !due) return;
@@ -489,7 +631,7 @@ async function maybeImprove(cfg: Config) {
   const ghToken = (await gh(["auth", "token"])).trim();
   const authVar = process.env.CLAUDE_CODE_OAUTH_TOKEN ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY";
   await docker(["run", "-d", "--name", "sf-improve", "--label", "sf.improve=1",
-    "--memory", cfg.containerMemory,
+    ...agentLimits(cfg),
     "-e", `REPO=${cfg.factoryRepo}`, "-e", `MODEL=${cfg.model}`, "-e", "GH_TOKEN", "-e", authVar,
     "-v", `${work}:/work`, "-v", `${runs}:/data/runs:ro`, "-v", `${metrics}:/data/metrics.jsonl:ro`,
     "--entrypoint", "/factory/improve.sh", cfg.image], { GH_TOKEN: ghToken });
@@ -498,110 +640,139 @@ async function maybeImprove(cfg: Config) {
 
 // ---------- Hauptschleife ----------
 
+/** Ein Lauf ging verloren (z. B. Server-Neustart): einmal automatisch neu starten, danach entscheidet der Mensch. */
+async function lostJob(cfg: Config, repo: string, issue: Issue): Promise<boolean> {
+  const s = getState(cfg, repo, issue.number);
+  if ((s.lostRetries ?? 0) < 1) { setState(cfg, repo, issue.number, { ...s, lostRetries: (s.lostRetries ?? 0) + 1 }); return true; }
+  await setStage(repo, issue, "failed");
+  await syncBoard(cfg, issue.url, "failed");
+  await comment(repo, issue.number, `failed:${lastFactoryMarker(issue)?.phase ?? "build"}`,
+    `### ⚠️ Der Lauf ist wiederholt verloren gegangen\n\nDie Factory startet ihn nicht noch einmal automatisch, damit keine Endlosschleife entsteht.\n\n_Schreib einen Kommentar, dann versucht sie es erneut._`);
+  setState(cfg, repo, issue.number, {});
+  return false;
+}
+
+async function tickRepo(cfg: Config, repo: string, containers: Container[], slots: { free: number }) {
+  const issues: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
+    "--json", "number,title,body,url,labels,comments", "--limit", "100"]));
+  issues.sort((a, b) => a.number - b.number); // älteste zuerst
+  const openNumbers = new Set(issues.map((i) => i.number));
+
+  // Label entfernt oder Issue geschlossen → laufenden Job stoppen und als beendet erfassen
+  for (const c of containers.filter((c) => c.repo === repo && !openNumbers.has(c.issue))) {
+    log("job:stopped", { repo, issue: c.issue, reason: "Label entfernt oder Issue geschlossen" });
+    await docker(["kill", c.name]).catch(() => {});
+    await docker(["rm", "-f", c.name]).catch(() => {});
+    slots.free++;
+  }
+
+  // Alte Labels aus der ersten Version umstellen
+  for (const issue of issues) {
+    const legacy = LEGACY[stageOf(issue) ?? ""];
+    if (legacy) await setStage(repo, issue, legacy);
+  }
+
+  // Review abgeschlossen: PR gemergt → Fertig
+  const closed: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", "factory:review", "--state", "closed",
+    "--json", "number,title,body,url,labels,comments", "--limit", "20"]));
+  for (const issue of [...closed, ...issues.filter((i) => stageOf(i) === "review")]) {
+    if (await findPr(repo, issue.number, "merged")) {
+      await setStage(repo, issue, "done");
+      await syncBoard(cfg, issue.url, "done");
+      rmSync(jobDir(cfg, repo, issue.number), { recursive: true, force: true });
+      rmSync(scenarioDir(cfg, repo, issue.number), { recursive: true, force: true });
+      rmSync(stateFile(cfg, repo, issue.number), { force: true });
+      log("job:done", { repo, issue: issue.number });
+    }
+  }
+
+  for (const issue of issues) {
+    const status = stageOf(issue);
+    const running = containers.find((c) => c.repo === repo && c.issue === issue.number && openNumbers.has(c.issue));
+    if (running) {
+      // Genauen Schritt aus dem laufenden Job aufs Board bringen
+      const step = readJobJson(join(jobDir(cfg, repo, issue.number), "status.json"), 10_000)?.step || undefined;
+      if (status) await syncBoard(cfg, issue.url, status, step);
+      continue;
+    }
+    if (!status) { await setStage(repo, issue, "new"); }
+    const current = stageOf(issue)!;
+    await syncBoard(cfg, issue.url, current);
+    if (current === "done") continue;
+
+    // Was als Nächstes zu tun ist
+    let phase: Phase | null = null;
+    let mode: Mode = "new";
+    let prUrl: string | undefined;
+    let lost = false;
+    const marker = lastFactoryMarker(issue);
+    const answered = humanCommentsSinceFactory(cfg, issue).length > 0;
+    if (current === "new") phase = "check";
+    else if (current === "checking") { phase = "check"; mode = "retry"; lost = true; }          // Prüf-Job verloren
+    else if (current === "approved") phase = "build";
+    else if (current === "working") {
+      phase = "build";
+      mode = marker?.status === "rework" ? "rework" : "retry";                                  // Rückgabe aus der Abnahme oder Job verloren
+      lost = mode === "retry";
+      if (mode === "rework") prUrl = (await findPr(repo, issue.number, "open"))?.url;
+    }
+    else if (current === "accepting") { phase = "accept"; prUrl = (await findPr(repo, issue.number, "open"))?.url; }
+    else if (answered && current === "question") { phase = (marker?.phase as Phase) ?? "check"; mode = "answer"; }
+    else if (answered && current === "rejected") { phase = "check"; mode = "answer"; }
+    else if (answered && current === "failed") { phase = (marker?.phase as Phase) ?? "build"; mode = "retry"; }
+    else if (answered && current === "review") {
+      prUrl = (await findPr(repo, issue.number, "open"))?.url;
+      if (prUrl) { phase = "build"; mode = "change-request"; }
+    }
+    if (!phase) continue;
+    // Ein gemeinsamer Platz-Pool für alle Phasen. Ohne freien Platz bleibt das Issue in seinem Status und kommt beim nächsten Durchlauf dran.
+    if (slots.free <= 0) continue;
+    if (lost && !(await lostJob(cfg, repo, issue))) continue;
+
+    if (phase === "accept") {
+      if (!prUrl) prUrl = (await findPr(repo, issue.number, "open"))?.url;
+      const reworks = reworksSinceApproval(issue);
+      const last = reworks >= cfg.maxReworks;
+      await launch(cfg, repo, issue, "accept", mode, prUrl,
+        `Abnahme-Runde: ${reworks + 1}${last ? " (letzte Runde: keine Rückgabe mehr. Bestanden → accepted, sonst unresolved)" : ""}`);
+    } else {
+      await launch(cfg, repo, issue, phase, mode, prUrl);
+    }
+    slots.free--;
+  }
+
+  await syncPreviews(cfg, repo, issues).catch((e) => log("preview:error", { repo, error: String(e) }));
+}
+
 async function tick(cfg: Config) {
   let containers = await listContainers();
 
-  // 1. Beendete Container auswerten, zu lange laufende stoppen
+  // 1. Beendete Container auswerten, zu lange laufende stoppen und als Fehlschlag erfassen
   for (const c of containers) {
-    if (!c.running) { await finish(cfg, c); continue; }
-    const minutes = (Date.now() - Date.parse(c.startedAt)) / 60000;
-    if (minutes > cfg.jobTimeoutMinutes) {
-      log("job:timeout", { repo: c.repo, issue: c.issue, minutes: Math.round(minutes) });
-      await docker(["kill", c.name]).catch(() => {});
+    try {
+      if (!c.running) { await finish(cfg, c); continue; }
+      const minutes = (Date.now() - Date.parse(c.startedAt)) / 60000;
+      if (minutes > cfg.jobTimeoutMinutes) {
+        log("job:timeout", { repo: c.repo, issue: c.issue, minutes: Math.round(minutes) });
+        await docker(["kill", c.name]).catch(() => {});
+        await finish(cfg, { ...c, running: false, exitCode: 137, finishedAt: new Date().toISOString() },
+          `Zeitlimit von ${cfg.jobTimeoutMinutes} Minuten überschritten.`);
+      }
+    } catch (e) {
+      log("finish:error", { repo: c.repo, issue: c.issue, error: String(e) });
     }
   }
   containers = (await listContainers()).filter((c) => c.running);
-  let freeChecks = cfg.maxChecks - containers.filter((c) => c.phase === "check").length;
-  let freeBuilds = cfg.maxParallel - containers.filter((c) => c.phase === "build").length;
-  let freeAccepts = cfg.maxAccepts - containers.filter((c) => c.phase === "accept").length;
+  const improving = await improveRunning(cfg);
+  const slots = { free: cfg.maxParallel - containers.length - (improving ? 1 : 0) };
 
+  // Ein fehlerhaftes Repo darf die anderen nicht blockieren
   for (const repo of cfg.repos) {
-    const issues: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
-      "--json", "number,title,body,url,labels,comments", "--limit", "100"]));
-    issues.sort((a, b) => a.number - b.number); // älteste zuerst
-    const openNumbers = new Set(issues.map((i) => i.number));
-
-    // Label entfernt oder Issue geschlossen → laufenden Job stoppen
-    for (const c of containers.filter((c) => c.repo === repo && !openNumbers.has(c.issue))) {
-      log("job:stopped", { repo, issue: c.issue, reason: "Label entfernt oder Issue geschlossen" });
-      await docker(["kill", c.name]).catch(() => {});
-    }
-
-    // Alte Labels aus der ersten Version umstellen
-    for (const issue of issues) {
-      const legacy = LEGACY[stageOf(issue) ?? ""];
-      if (legacy) await setStage(repo, issue, legacy);
-    }
-
-    // Review abgeschlossen: PR gemergt → Fertig
-    const closed: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", "factory:review", "--state", "closed",
-      "--json", "number,title,body,url,labels,comments", "--limit", "20"]));
-    for (const issue of [...closed, ...issues.filter((i) => stageOf(i) === "review")]) {
-      if (await findPr(repo, issue.number, "merged")) {
-        await setStage(repo, issue, "done");
-        await syncBoard(cfg, issue.url, "done");
-        rmSync(jobDir(cfg, repo, issue.number), { recursive: true, force: true });
-        rmSync(scenarioDir(cfg, repo, issue.number), { recursive: true, force: true });
-        log("job:done", { repo, issue: issue.number });
-      }
-    }
-
-    for (const issue of issues) {
-      const status = stageOf(issue);
-      const running = containers.find((c) => c.repo === repo && c.issue === issue.number);
-      if (running) {
-        // Genauen Schritt aus dem laufenden Job aufs Board bringen
-        let step: string | undefined;
-        try { step = JSON.parse(readFileSync(join(jobDir(cfg, repo, issue.number), "status.json"), "utf8")).step || undefined; } catch {}
-        if (status) await syncBoard(cfg, issue.url, status, step);
-        continue;
-      }
-      if (!status) { await setStage(repo, issue, "new"); }
-      const current = stageOf(issue)!;
-      await syncBoard(cfg, issue.url, current);
-      if (current === "done") continue;
-
-      // Was als Nächstes zu tun ist
-      let phase: Phase | null = null;
-      let mode: Mode = "new";
-      let prUrl: string | undefined;
-      const marker = lastFactoryMarker(issue);
-      const answered = humanCommentsSinceFactory(issue).length > 0;
-      if (current === "new") phase = "check";
-      else if (current === "checking") { phase = "check"; mode = "retry"; }          // Prüf-Job verloren
-      else if (current === "approved") phase = "build";
-      else if (current === "working") {
-        phase = "build";
-        mode = marker?.status === "rework" ? "rework" : "retry";                     // Rückgabe aus der Abnahme oder Job verloren
-        if (mode === "rework") prUrl = (await findPr(repo, issue.number, "open"))?.url;
-      }
-      else if (current === "accepting") { phase = "accept"; prUrl = (await findPr(repo, issue.number, "open"))?.url; }
-      else if (answered && current === "question") { phase = (marker?.phase as Phase) ?? "check"; mode = "answer"; }
-      else if (answered && current === "rejected") { phase = "check"; mode = "answer"; }
-      else if (answered && current === "failed") { phase = (marker?.phase as Phase) ?? "build"; mode = "retry"; }
-      else if (answered && current === "review") {
-        prUrl = (await findPr(repo, issue.number, "open"))?.url;
-        if (prUrl) { phase = "build"; mode = "change-request"; }
-      }
-      if (!phase) continue;
-
-      // Prüfungen und Bau haben getrennte Plätze. Ohne freien Platz bleibt das Issue in seinem Status und kommt beim nächsten Durchlauf dran.
-      if (phase === "check" && freeChecks > 0) { await launch(cfg, repo, issue, "check", mode); freeChecks--; }
-      else if (phase === "build" && freeBuilds > 0) { await launch(cfg, repo, issue, "build", mode, prUrl); freeBuilds--; }
-      else if (phase === "accept" && freeAccepts > 0) {
-        if (!prUrl) prUrl = (await findPr(repo, issue.number, "open"))?.url;
-        const reworks = reworksSinceApproval(issue);
-        const last = reworks >= cfg.maxReworks;
-        await launch(cfg, repo, issue, "accept", mode, prUrl,
-          `Abnahme-Runde: ${reworks + 1}${last ? " (letzte Runde: keine Rückgabe mehr, offene Probleme als „Bitte genau prüfen“ melden)" : ""}`);
-        freeAccepts--;
-      }
-    }
-
-    await syncPreviews(cfg, repo, issues).catch((e) => log("preview:error", { repo, error: String(e) }));
+    try { await tickRepo(cfg, repo, containers, slots); }
+    catch (e) { log("repo:error", { repo, error: String(e) }); }
   }
 
-  await maybeImprove(cfg).catch((e) => log("improve:error", { error: String(e) }));
+  await maybeImprove(cfg, slots.free).catch((e) => log("improve:error", { error: String(e) }));
 }
 
 async function main() {
@@ -615,8 +786,13 @@ async function main() {
     log("config:warning", { warning: "Beide Login-Arten gesetzt. Es wird nur CLAUDE_CODE_OAUTH_TOKEN an die Jobs gegeben." });
   }
   CONTAINER_UID = Number((await docker(["run", "--rm", "--entrypoint", "id", cfg.image, "-u"])).trim());
+  FACTORY_LOGIN = (await gh(["api", "user", "--jq", ".login"])).trim();
   await initBoard(cfg);
-  log("runner:started", { preview: cfg.preview ? `http://${cfg.preview.host}:4001…` : "aus", containerUid: CONTAINER_UID, repos: cfg.repos, maxChecks: cfg.maxChecks, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow });
+  log("runner:started", {
+    login: FACTORY_LOGIN, allowedUsers: cfg.allowedUsers ?? [],
+    preview: cfg.preview ? previewLink(cfg, 1).replace(/:4001$/, ":4001…") : "aus",
+    containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow,
+  });
   while (true) {
     try {
       cfg = loadConfig();
@@ -629,4 +805,6 @@ async function main() {
   }
 }
 
-main();
+export { finish, tick }; // für Tests
+
+if ((import.meta as any).main) main();

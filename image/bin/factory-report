@@ -10,6 +10,7 @@
 #                   factory-report question  "..." --question "..."
 # Phase "Abnahme":  factory-report accepted  "<Zusammenfassung>" --pr <url> --body-file <abnahmebericht>
 #                   factory-report rework    "<Zusammenfassung der Befunde>" --body-file <befunde>
+#                   factory-report unresolved "<Zusammenfassung>" --pr <url> --body-file <bericht>   (nur letzte Runde: nicht bestanden, Mensch entscheidet)
 # Immer:            factory-report failed    "<Grund>"
 set -euo pipefail
 
@@ -25,14 +26,15 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-STEP=""
+STEP=""; UNRESOLVED=false
 case "$STAGE" in
   checking|approved|question|rejected|failed) STATUS="$STAGE" ;;
   built) STATUS="accepting" ;;
   accepted|review) STATUS="review" ;;
+  unresolved) STATUS="review"; UNRESOLVED=true ;;
   rework) STATUS="working" ;;
   architecture|implementing|verifying) STATUS="working"; STEP="$STAGE" ;;
-  *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying built accepted rework failed" >&2; exit 2 ;;
+  *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying built accepted rework unresolved failed" >&2; exit 2 ;;
 esac
 # In der Abnahme sind Zwischenschritte kein Statuswechsel: der Status bleibt "Abnahme"
 if [ "${PHASE:-build}" = "accept" ] && { [ "$STATUS" = "checking" ] || { [ "$STATUS" = "working" ] && [ "$STAGE" != "rework" ]; }; }; then
@@ -40,8 +42,8 @@ if [ "${PHASE:-build}" = "accept" ] && { [ "$STATUS" = "checking" ] || { [ "$STA
 fi
 [ -n "$SUMMARY" ] || { echo "Zusammenfassung fehlt" >&2; exit 2; }
 case "$STAGE" in question|rejected) [ -n "$QUESTION" ] || { echo "$STAGE braucht --question" >&2; exit 2; } ;; esac
-case "$STAGE" in built|accepted|review) [ -n "$PR_URL" ] || { echo "$STAGE braucht --pr <url>" >&2; exit 2; } ;; esac
-[ "$STAGE" = "rework" ] && { [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] || { echo "rework braucht --body-file mit den Befunden" >&2; exit 2; }; }
+case "$STAGE" in built|accepted|review|unresolved) [ -n "$PR_URL" ] || { echo "$STAGE braucht --pr <url>" >&2; exit 2; } ;; esac
+{ [ "$STAGE" = "rework" ] || [ "$STAGE" = "unresolved" ]; } && { [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] || { echo "rework braucht --body-file mit den Befunden" >&2; exit 2; }; }
 
 : "${REPO:?}" "${ISSUE:?}"
 PHASE="${PHASE:-build}"
@@ -77,6 +79,12 @@ case "$STAGE" in
       PR_NR="${PR_URL##*/}"
       { echo "<!-- software-factory:acceptance -->"; echo "### ✅ Unabhängige Abnahme"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true
     fi ;;
+  unresolved)
+    REPORT=$(cat "$BODY_FILE")
+    { echo "$MARK"; echo "### ⚠️ Abnahme nicht bestanden, du entscheidest: $PR_URL"; echo; echo "$SUMMARY"; echo; echo "$REPORT"; echo;
+      echo "_Die Factory hat die Befunde nach mehreren Runden nicht beheben können. Prüf den PR selbst: Änderungswünsche hier ins Issue schreiben, oder PR schließen._"; } | comment
+    PR_NR="${PR_URL##*/}"
+    { echo "<!-- software-factory:acceptance -->"; echo "### ⚠️ Unabhängige Abnahme: nicht bestanden"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true ;;
   rework)
     { echo "$MARK"; echo "### 🔁 Abnahme nicht bestanden, zurück in die Entwicklung"; echo; echo "$SUMMARY"; echo; cat "$BODY_FILE"; } | comment ;;
   failed)
@@ -84,6 +92,6 @@ case "$STAGE" in
       echo "_Schreib einen Kommentar mit einem Hinweis, dann versucht sie es erneut._"; } | comment ;;
 esac
 
-jq -n --arg status "$STATUS" --arg step "$STEP" --arg phase "$PHASE" --arg summary "$SUMMARY" --arg question "$QUESTION" --arg pr "$PR_URL" \
-  '{status:$status, step:$step, phase:$phase, summary:$summary, question:$question, pr:$pr, at:(now|todate)}' > /work/status.json
+jq -n --arg status "$STATUS" --arg step "$STEP" --arg phase "$PHASE" --arg summary "$SUMMARY" --arg question "$QUESTION" --arg pr "$PR_URL" --argjson unresolved "$UNRESOLVED" \
+  '{status:$status, step:$step, phase:$phase, summary:$summary, question:$question, pr:$pr, unresolved:$unresolved, at:(now|todate)}' > /work/status.json
 echo "Gemeldet: $STAGE"
