@@ -35,7 +35,7 @@ ssh root@DEINE-SERVER-IP
 ```
 
 - Beim ersten Mal fragt das Terminal, ob du dem Server vertraust. Bestätige mit `yes`.
-- Dann gibst du das Root-Passwort ein. Beim Tippen siehst du nichts, das ist normal.
+- Dann gibst du das Root-Passwort ein. Beim Tippen siehst du nichts, das ist normal. Hast du einen SSH-Key hinterlegt, fragt dein Rechner stattdessen nach dessen Passphrase (oder gar nicht, wenn er sie gespeichert hat).
 
 Kein Terminal zur Hand? Im hPanel gibt es auch ein **Browser-Terminal**, damit geht alles Folgende direkt im Browser.
 
@@ -67,26 +67,20 @@ claude setup-token
 
 Du meldest dich im Browser an und bekommst einen langen Token, der mit `sk-ant-oat` beginnt. Diesen Weg dokumentiert Anthropic für Skripte und Automatisierung.
 
-Dann **auf dem Server** speichern, ohne dass der Token im Verlauf landet:
+Dann **auf dem Server** speichern, ohne dass der Token im Verlauf landet. Füge den Token ein, drück **Enter** und dann **Strg+D**:
 
 ```bash
-read -rsp "Token einfügen und Enter drücken: " T && echo "CLAUDE_CODE_OAUTH_TOKEN=$T" > /etc/software-factory/secrets.env && chmod 600 /etc/software-factory/secrets.env && unset T && echo " gespeichert"
+stty -echo; printf "Token einfügen, dann Enter und Strg+D: "; T=$(cat | tr -d '[:space:]'); stty echo; echo; printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$T" > /etc/software-factory/secrets.env && chmod 600 /etc/software-factory/secrets.env && unset T && awk -F= '{print length($2) " Zeichen"}' /etc/software-factory/secrets.env
 ```
 
-Kurzer Check, ob der Token vollständig angekommen ist (er sollte deutlich über 100 Zeichen lang sein):
-
-```bash
-awk -F= '{print length($2) " Zeichen"}' /etc/software-factory/secrets.env
-```
-
-Ist die Zahl viel kleiner, wurde der Token beim Einfügen abgeschnitten. Dann den Befehl oben einfach wiederholen und darauf achten, dass der Token in einer Zeile kopiert ist.
+Der Befehl zeigt am Ende die Länge des Tokens. Sie sollte deutlich über 100 Zeichen liegen. Das Terminal bricht den langen Token oft auf zwei Zeilen um; der Befehl liest deshalb bis Strg+D und entfernt Zeilenumbrüche. Ist die Zahl trotzdem viel kleiner, wiederhol ihn einfach.
 
 **Wichtig zu den Limits:** Die Factory verbraucht dieselben Nutzungslimits wie deine normale Arbeit mit Claude. Wenn sie nachts entwickelt, hast du morgens entsprechend weniger übrig.
 
 **Variante B: API-Key.** Für Teams oder wenn du die Factory als Dienst für andere betreibst, nimm einen Anthropic-API-Key aus der [Console](https://console.anthropic.com). Abgerechnet wird dann nach Verbrauch:
 
 ```bash
-read -rsp "API-Key einfügen und Enter drücken: " K && echo "ANTHROPIC_API_KEY=$K" > /etc/software-factory/secrets.env && chmod 600 /etc/software-factory/secrets.env && unset K && echo " gespeichert"
+stty -echo; printf "API-Key einfügen, dann Enter und Strg+D: "; K=$(cat | tr -d '[:space:]'); stty echo; echo; printf 'ANTHROPIC_API_KEY=%s\n' "$K" > /etc/software-factory/secrets.env && chmod 600 /etc/software-factory/secrets.env && unset K && echo "gespeichert"
 ```
 
 Mehr dazu: [Authentication](https://code.claude.com/docs/en/authentication) und [Legal and Compliance](https://code.claude.com/docs/en/legal-and-compliance) in der Claude-Code-Doku. Anthropic kann die Regeln ändern; prüf die Doku, bevor du startest.
@@ -101,27 +95,16 @@ Wähle **GitHub.com**, **HTTPS** und die Anmeldung über den Browser. Du bekomms
 
 `-s project` gibt der Factory zusätzlich das Recht, dein Kanban-Board (GitHub Projects) zu bearbeiten. Ohne diese Berechtigung kann sie die Karten nicht verschieben.
 
-## 6. Ein Repo anbinden
-
-Die Factory arbeitet nur in Repos, die du ihr ausdrücklich gibst:
+## 6. Die Factory starten
 
 ```bash
-cd /opt/software-factory
-./scripts/add-repo.sh dein-github-name/dein-repo
 systemctl restart software-factory
-```
-
-`add-repo.sh` legt die Status-Labels im Repo an, trägt es in die Konfiguration ein und erstellt beim ersten Mal das Kanban-Board „Software Factory“ in deinem GitHub-Account. Den Link zum Board zeigt es am Ende an.
-
-Für jedes weitere Projekt führst du `add-repo.sh` einfach noch einmal aus. Alle Repos landen auf demselben Board. Einen Neustart brauchst du dann nicht, die Factory liest ihre Konfiguration jede Minute neu.
-
-Läuft alles? Das siehst du in den Logs:
-
-```bash
 journalctl -u software-factory -f
 ```
 
-Du solltest `runner:started` und `board:ready` sehen. Mit `Strg+C` beendest du die Anzeige, die Factory läuft weiter.
+In den Logs solltest du `runner:started` sehen. Mit `Strg+C` beendest du die Anzeige, die Factory läuft weiter. Nur die neuesten Einträge zeigt `journalctl -u software-factory -f --since "5 min ago"`.
+
+Noch hat die Factory kein Projekt. Bis du in Schritt 8 eins anbindest, meldet sie jede Minute einen `repo:error` für das Platzhalter-Repo `DEIN-GITHUB-NAME/dein-repo`. Das ist normal.
 
 ## 6b. Vorschau mit HTTPS (empfohlen)
 
@@ -157,22 +140,34 @@ cd software-factory
 ./scripts/install-local-skills.sh
 ```
 
-Danach hast du in jedem Projekt diese Befehle in Claude Code:
+Danach hast du in jedem Projekt diese Befehle in Claude Code (eine laufende Claude-Code-Sitzung vorher neu starten):
 
 - `/init`: richtet ein Projekt ein (Produktbeschreibung, Stack, Design, Feature-Liste)
 - `/write-spec`: erarbeitet mit dir im Interview die Spezifikation für ein Feature
 - `/to-factory`: übergibt eine fertige Spec als GitHub Issue an die Factory
 
-## 8. Ein neues Projekt starten
+Die Skills sind Verknüpfungen auf diesen Ordner. Updates holst du dir mit `git pull` darin. **Verschieb oder lösch den Ordner danach nicht**, sonst findet Claude Code die Skills nicht mehr. Hast du ihn doch verschoben, führ `./scripts/install-local-skills.sh` am neuen Ort einfach noch einmal aus.
 
-Der schnellste Weg ist die Projekt-Vorlage. Sag dem Skript einmal, wo dein Server ist:
+## 8. Ein Projekt anbinden
+
+Die Factory arbeitet nur in Repos, die du ihr ausdrücklich gibst. Dabei legt sie die Status-Labels im Repo an, trägt es in ihre Konfiguration ein und erstellt beim ersten Mal das Kanban-Board „Software Factory“ in deinem GitHub-Account.
+
+### Neues Projekt (empfohlen)
+
+Der schnellste Weg ist die Projekt-Vorlage. Wechsle auf deinem Rechner in den Ordner, in dem das Projekt liegen soll (z. B. `~/Projects`), und sag dem Skript, wo dein Server ist. Einen Projektordner musst du nicht vorher anlegen, das Skript erstellt ihn selbst:
 
 ```bash
 export FACTORY_SERVER=root@DEINE-SERVER-IP
-./scripts/new-project.sh mein-projekt
+~/software-factory/scripts/new-project.sh mein-projekt
 ```
 
-Das legt ein privates GitHub-Repo aus der Vorlage an, klont es und bindet es per SSH an deine Factory an (Schritt 6 passiert also automatisch). Mit `--public` am Ende wird das Repo öffentlich.
+(Den Pfad zum Skript passt du an den Ort an, an den du die Factory in Schritt 7 geklont hast.)
+
+Das Skript erledigt drei Dinge auf einmal:
+
+1. Es legt auf GitHub ein privates Repo aus der Vorlage an. Mit `--public` am Ende wird es öffentlich.
+2. Es klont das Repo in den aktuellen Ordner.
+3. Es bindet das Repo per SSH an deine Factory an, inklusive Labels und Board. Den Link zum Board zeigt es am Ende an.
 
 Dann im neuen Projektordner:
 
@@ -180,7 +175,18 @@ Dann im neuen Projektordner:
 2. Starte Claude Code und führe `/init` aus. Claude stellt dir Fragen und legt daraus Produktbeschreibung, Stack, Design-Vorgaben und die Feature-Liste an, inklusive `.factory/setup.json` mit den Befehlen für Installation, Start und Prüfungen.
 3. Prüf das Ergebnis und push es.
 
-**Ein bestehendes Projekt** bindest du mit `add-repo.sh` an (Schritt 6) und führst darin ebenfalls `/init` aus, damit die Factory Stack und Prüfbefehle kennt.
+### Bestehendes Repo
+
+Ein Repo, das es schon gibt, bindest du **auf dem Server** an:
+
+```bash
+cd /opt/software-factory
+./scripts/add-repo.sh dein-github-name/dein-repo
+```
+
+Führ danach im Projekt auf deinem Rechner ebenfalls `/init` aus, damit die Factory Stack und Prüfbefehle kennt.
+
+Für jedes weitere Projekt wiederholst du einfach einen der beiden Wege. Alle Repos landen auf demselben Board; einen Neustart der Factory brauchst du nicht.
 
 ## 9. Die erste Aufgabe übergeben
 
@@ -293,6 +299,7 @@ Der Standard `maxParallel: 2` passt zum KVM 2: zwei Läufe mit je bis zu 3 GB pl
 |---|---|
 | Nichts passiert nach `/to-factory` | `journalctl -u software-factory -f` ansehen. Hat das Issue das Label `factory`? Ist das Repo mit `add-repo.sh` angebunden? |
 | `config:error … Weder CLAUDE_CODE_OAUTH_TOKEN noch ANTHROPIC_API_KEY` | Schritt 4 wiederholen, dann `systemctl restart software-factory` |
+| Beim Token-Einfügen landet ein Teil als Befehl in der Shell | Der Token wurde umgebrochen. `history -c` ausführen (löscht den Rest aus dem Verlauf), dann Schritt 4 mit Strg+D wiederholen |
 | `board:error` in den Logs | `gh auth refresh -s project`, dann `systemctl restart software-factory` |
 | Status **Fehlgeschlagen** | Der Fehler steht als Kommentar im Issue. Ursache beheben, dann im Issue kommentieren |
 | Vorschau lädt nicht | Nach jedem neuen Stand braucht sie 1–2 Minuten. Ist schon eine Vorschau aktiv (`preview.max`), bekommt der PR keine weitere. Mit Domain: Zeigt die Subdomain auf den Server und sind Port 80 und 443 offen? |

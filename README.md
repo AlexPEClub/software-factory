@@ -2,6 +2,12 @@
 
 Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft. Dein Laptop kann dabei zu sein.
 
+> 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS. Getestet ist sie auf dem **Hostinger KVM 2** (2 CPU-Kerne, 8 GB RAM) mit der Vorlage „Ubuntu 24.04 mit Claude Code“.
+> Server holen: **[hostinger.com/alexclaude](https://hostinger.com/alexclaude)**. Mit dem Code **`ALEXCLAUDE`** sparst du zusätzlich 10 %.
+> Einrichtung Schritt für Schritt: **[docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md)**
+>
+> _Affiliate-Link: Wenn du darüber kaufst, bekomme ich eine Provision. Für dich ändert sich am Preis nichts, mit dem Code wird es günstiger._
+
 **Du entscheidest, was gebaut wird. Die Factory baut es.**
 
 1. Du schreibst lokal mit Claude Code die Spec (`/write-spec`), prüfst sie und pushst sie.
@@ -60,9 +66,9 @@ cd /opt/software-factory
 Danach:
 1. **Claude-Login:** auf deinem Rechner `claude setup-token` ausführen und den Token als `CLAUDE_CODE_OAUTH_TOKEN=...` in `/etc/software-factory/secrets.env` eintragen
 2. **GitHub-Login** auf dem Server: `gh auth login -s project`
-3. **Repo anbinden:** `./scripts/add-repo.sh dein-name/dein-repo`. Legt Labels an, trägt das Repo ein und erstellt beim ersten Mal das Kanban-Board. Für jedes weitere Repo erneut ausführen.
-4. `systemctl restart software-factory`
-5. Auf deinem Rechner: `./scripts/install-local-skills.sh`, dann `./scripts/new-project.sh mein-projekt` → Briefing in `docs/briefing.md` → `/init` → `/write-spec` → `/to-factory`
+3. **Factory starten:** `systemctl restart software-factory`
+4. **Auf deinem Rechner:** `./scripts/install-local-skills.sh`, dann `FACTORY_SERVER=root@DEINE-IP ./scripts/new-project.sh mein-projekt`. Legt das Repo aus der Vorlage an und bindet es samt Labels und Kanban-Board an die Factory an. Ein bestehendes Repo bindest du stattdessen auf dem Server mit `./scripts/add-repo.sh dein-name/dein-repo` an.
+5. Im Projekt: Briefing in `docs/briefing.md` → `/init` → pro Feature `/write-spec` → `/to-factory`
 
 Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger): [docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md).
 
