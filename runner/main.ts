@@ -73,7 +73,7 @@ function log(event: string, data: Record<string, unknown> = {}) {
 export function loadConfig(path = CONFIG_PATH): Config {
   const c = JSON.parse(readFileSync(path, "utf8"));
   return {
-    label: "factory", maxParallel: 1, model: "opus", workflow: "starter-kit", pollSeconds: 60,
+    label: "factory", maxParallel: 2, model: "opus", workflow: "starter-kit", pollSeconds: 60,
     jobTimeoutMinutes: 90, image: "software-factory-job:latest", dataDir: "/var/lib/software-factory",
     containerMemory: "3g", maxReworks: 2, ...c,
   };

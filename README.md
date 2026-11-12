@@ -106,7 +106,7 @@ Die Factory startet die **unveränderte, offizielle Claude Code CLI** auf deinem
 
 ## Sicherheit und Grenzen (Version 0.1)
 
-- Jeder Lauf hat einen eigenen Container mit Speicher- und Prozesslimit. Standard: ein Agent-Lauf gleichzeitig (`maxParallel: 1`).
+- Jeder Lauf hat einen eigenen Container mit Speicher- und Prozesslimit. Standard: zwei Agent-Läufe gleichzeitig (`maxParallel: 2`), passend zu 8 GB RAM.
 - Antworten und Änderungswünsche nimmt die Factory nur von dir an (plus `allowedUsers`). Fremde Kommentare sieht der Agent nicht.
 - Ein Bau zählt nur, wenn `factory-verify` auf genau dem gepushten Commit grün ist und die Spec unverändert bleibt. Besteht die Abnahme nach zwei Runden nicht, landet der PR mit „Abnahme nicht bestanden“ bei dir, nie als bestanden.
 - Vorschauen laufen ohne Zugangsdaten, mit Passwort und mit Domain über HTTPS.

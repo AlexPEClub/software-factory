@@ -258,7 +258,7 @@ Die Konfiguration liegt in `/etc/software-factory/config.json`. Die wichtigsten 
 
 | Feld | Standard | Bedeutung |
 |---|---|---|
-| `maxParallel` | `1` | Wie viele Agent-Läufe gleichzeitig laufen (Prüfung, Entwicklung, Abnahme, Verbesserung), über alle Repos zusammen |
+| `maxParallel` | `2` | Wie viele Agent-Läufe gleichzeitig laufen (Prüfung, Entwicklung, Abnahme, Verbesserung), über alle Repos zusammen |
 | `model` | `opus` | Modell für alle Agents |
 | `jobTimeoutMinutes` | `90` | Danach wird ein Lauf abgebrochen |
 | `containerMemory` | `3g` | Arbeitsspeicher pro Agent-Container |
@@ -269,7 +269,7 @@ Die Konfiguration liegt in `/etc/software-factory/config.json`. Die wichtigsten 
 
 Nach Änderungen: `systemctl restart software-factory`.
 
-Mit `maxParallel: 1` arbeitet die Factory die Aufgaben nacheinander ab. Auf dem KVM 2 kannst du auf `2` gehen. Mehr Parallelität verbraucht mehr Arbeitsspeicher und vor allem schneller deine Claude-Limits.
+Der Standard `maxParallel: 2` passt zum KVM 2: zwei Läufe mit je bis zu 3 GB plus eine Vorschau. Mehr Parallelität braucht mehr Arbeitsspeicher und verbraucht vor allem schneller deine Claude-Limits. Mit einem Pro-Abo ist `1` die sicherere Wahl.
 
 ## 13. Absichern
 
