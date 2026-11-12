@@ -1,6 +1,6 @@
 # Software Factory
 
-Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft. Dein Laptop kann dabei zu sein.
+Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft.
 
 > 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS. Getestet ist sie auf dem **Hostinger KVM 2** (2 CPU-Kerne, 8 GB RAM) mit der Vorlage „Ubuntu 24.04 mit Claude Code“.
 > Server holen: **[hostinger.com/alexclaude](https://hostinger.com/alexclaude)**. Mit dem Code **`ALEXCLAUDE`** sparst du zusätzlich 10 %.
