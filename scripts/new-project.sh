@@ -5,7 +5,7 @@
 #   ./scripts/new-project.sh <projektname> [--public]
 #
 # Einstellungen (Umgebungsvariablen oder ~/.config/software-factory/env):
-#   FACTORY_SERVER    SSH-Ziel deines Servers, z. B. root@187.124.14.173
+#   FACTORY_SERVER    SSH-Ziel deines Servers, z. B. root@203.0.113.10
 #   FACTORY_TEMPLATE  Template-Repo (Standard: AlexPEClub/factory-template)
 #   FACTORY_DIR       Pfad der Factory auf dem Server (Standard: /opt/software-factory)
 set -euo pipefail
