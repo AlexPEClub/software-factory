@@ -4,6 +4,7 @@
   ],
   "label": "factory",
   "maxParallel": 2,
+  "agent": "claude",
   "model": "opus",
   "workflow": "starter-kit",
   "pollSeconds": 60,

@@ -35,7 +35,7 @@ Ziel: eine klare Entscheidung in wenigen Minuten. **Kein Code, keine Commits, ke
 **Feature**
 - Suche die Zeile `Spec: <pfad>` im Issue oder in den Kommentaren, z. B. `Spec: features/PROJ-3-genre-sortierung/spec.md`.
 - **Keine Spec angegeben oder Datei fehlt auf dem Standard-Branch** → ablehnen:
-  `factory-report rejected "Für dieses Feature gibt es keine Spec." --question "Bitte leg die Spec lokal mit /write-spec an, pushe sie auf den Standard-Branch und schreib hier eine Zeile 'Spec: features/<ordner>/spec.md'."`
+  `factory-report rejected "Für dieses Feature gibt es keine Spec." --question "Bitte leg die Spec lokal mit dem Skill write-spec an, pushe sie auf den Standard-Branch und schreib hier eine Zeile 'Spec: features/<ordner>/spec.md'."`
 - **Spec vorhanden:** vollständig lesen, dazu `docs/stack.md`, `docs/PRD.md`, `features/INDEX.md` und einen Blick in den bestehenden Code. Prüfe:
   - Ist jedes Akzeptanzkriterium eindeutig testbar?
   - Gibt es Widersprüche in der Spec oder zum bestehenden Code, zu anderen Features, zur PRD?

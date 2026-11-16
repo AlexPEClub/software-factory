@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
-# Startet einen Factory-Job: Repo holen, Branch auschecken, Claude Code mit Playbook laufen lassen.
-# Erwartet: REPO, ISSUE, BRANCH, MODEL, WORKFLOW, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN (oder ANTHROPIC_API_KEY)
+# Startet einen Factory-Job: Repo holen, Branch auschecken, gewählten Agent mit Playbook laufen lassen.
+# Erwartet: REPO, ISSUE, BRANCH, AGENT, MODEL, WORKFLOW, GH_TOKEN und den passenden Agent-Login
 # und /work/prompt.md (vom Runner geschrieben).
 set -euo pipefail
 
 log() { echo "[factory] $*"; }
 
 : "${REPO:?}" "${ISSUE:?}" "${BRANCH:?}"
-MODEL="${MODEL:-opus}"
+AGENT="${AGENT:-claude}"
 export PHASE="${PHASE:-build}"   # check = prüfen, build = entwickeln, accept = unabhängige Abnahme
 WORKFLOW="${WORKFLOW:-starter-kit}"
+export AGENT WORKFLOW
 
 # Workflow-Skills als Nutzer-Skills bereitstellen (landen nicht im Ziel-Repo)
-mkdir -p "$HOME/.claude/skills"
+case "$AGENT" in
+  claude) SKILLS_DIR="$HOME/.claude/skills" ;;
+  codex) SKILLS_DIR="$HOME/.agents/skills" ;;
+  *) echo "Unbekannter Agent: $AGENT" >&2; exit 2 ;;
+esac
+mkdir -p "$SKILLS_DIR"
 if [ -d "/factory/workflows/$WORKFLOW/skills" ]; then
-  cp -r "/factory/workflows/$WORKFLOW/skills/." "$HOME/.claude/skills/"
+  cp -r "/factory/workflows/$WORKFLOW/skills/." "$SKILLS_DIR/"
 fi
 
 gh auth setup-git >/dev/null
@@ -50,17 +56,10 @@ if [ "$PHASE" != "check" ] && [ -f .factory/setup.json ]; then
 fi
 
 export FACTORY_DEFAULT_BRANCH="$DEFAULT_BRANCH"
-log "Starte Claude Code ($MODEL, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
+log "Starte $AGENT (${MODEL:-CLI-Standard}, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
 set +e
-claude -p "$(cat /work/prompt.md)" \
-  --append-system-prompt-file /factory/playbook.md \
-  --add-dir "/factory/workflows/$WORKFLOW" \
-  --model "$MODEL" \
-  --dangerously-skip-permissions \
-  --output-format stream-json --verbose \
-  > /work/claude.jsonl 2> /work/claude.err
+factory-agent /factory/playbook.md < /work/prompt.md
 CODE=$?
 set -e
-log "Claude Code beendet mit Exit-Code $CODE"
-tail -n 1 /work/claude.jsonl | jq -r '"Ergebnis: " + ((.result // "-") | tostring | .[0:500])' 2>/dev/null || true
+log "$AGENT beendet mit Exit-Code $CODE"
 exit $CODE

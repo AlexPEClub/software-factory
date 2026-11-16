@@ -4,11 +4,11 @@ Basiert auf dem [AI Coding Starter Kit](https://github.com/AlexPEClub/ai-coding-
 
 ## Aufgabenteilung
 
-- **Du (lokal mit Claude Code):** Spec schreiben mit `/write-spec` (Interview), prüfen, auf den Standard-Branch pushen, mit `/to-factory` an die Factory übergeben. Die Spec ist die Basis für alles und wird von dir abgenommen.
+- **Du (lokal mit Claude Code oder Codex):** Spec schreiben mit `write-spec` (Interview), prüfen, auf den Standard-Branch pushen, mit `to-factory` an die Factory übergeben. Claude: `/write-spec`, `/to-factory`; Codex: `$write-spec`, `$to-factory`. Die Spec ist die Basis für alles und wird von dir abgenommen.
 - **Factory (auf dem Server):** Architektur, Umsetzung, QA, Pull Request.
 - **Du:** Pull Request prüfen und mergen.
 
-Die lokalen Skills liegen unter `local-skills/` im Factory-Repo. Kopiere sie in `.claude/skills/` deines Projekts.
+Die lokalen Skills liegen unter `local-skills/` im Factory-Repo. Installiere sie mit `./scripts/install-local-skills.sh claude`, `codex` oder `both`. Projektlokal sind `.claude/skills/` für Claude und `.agents/skills/` für Codex möglich.
 
 ## Ablage
 

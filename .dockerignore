@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+.env
+.env.*
+**/secrets.env
+**/auth.json
+**/.codex
+.agents
+graphify-out

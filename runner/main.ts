@@ -1,6 +1,6 @@
 // Software Factory – Runner
 // Läuft dauerhaft auf dem Server. Holt GitHub Issues mit dem Label "factory",
-// startet pro Issue einen Docker-Container mit Claude Code und hält Labels und Board aktuell.
+// startet pro Issue einen Docker-Container mit Claude Code oder Codex und hält Labels und Board aktuell.
 // Er schreibt selbst nie Code. Das macht der Agent im Container.
 
 import {
@@ -9,11 +9,15 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+export type Agent = "claude" | "codex";
 export type Config = {
   repos: string[];
   label: string;
   /** Wie viele Agent-Läufe gleichzeitig, über alle Phasen und Repos (Prüfung, Bau, Abnahme, Verbesserung) */
   maxParallel: number;
+  agent?: Agent;
+  /** Persistenter Codex-Login im eigenen Verzeichnis; nur bei ChatGPT-Anmeldung nötig. */
+  codexAuthDir?: string;
   model: string;
   workflow: string;
   pollSeconds: number;
@@ -36,7 +40,7 @@ export type Config = {
 
 type Comment = { author: { login: string } | null; body: string; createdAt: string };
 type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
-type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
+type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; agent?: Agent; model?: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
 type Phase = "check" | "build" | "accept";
 type Mode = "new" | "answer" | "change-request" | "retry" | "rework";
 
@@ -72,11 +76,33 @@ function log(event: string, data: Record<string, unknown> = {}) {
 
 export function loadConfig(path = CONFIG_PATH): Config {
   const c = JSON.parse(readFileSync(path, "utf8"));
+  if (c.agent !== undefined && c.agent !== "claude" && c.agent !== "codex") throw new Error('agent muss "claude" oder "codex" sein');
+  if (c.model !== undefined && typeof c.model !== "string") throw new Error("model muss ein String sein");
+  if (c.codexAuthDir !== undefined && (typeof c.codexAuthDir !== "string" || !c.codexAuthDir.startsWith("/") || c.codexAuthDir.includes(","))) {
+    throw new Error("codexAuthDir muss ein absoluter Linux-Pfad ohne Komma sein");
+  }
   return {
-    label: "factory", maxParallel: 2, model: "opus", workflow: "starter-kit", pollSeconds: 60,
+    label: "factory", maxParallel: 2, agent: "claude", model: c.agent === "codex" ? "" : "opus", workflow: "starter-kit", pollSeconds: 60,
     jobTimeoutMinutes: 90, image: "software-factory-job:latest", dataDir: "/var/lib/software-factory",
     containerMemory: "3g", maxReworks: 2, ...c,
   };
+}
+
+/** Nur die Zugangsdaten des gewählten Agents an Jobs und Verbesserungsläufe geben. */
+export function agentDockerArgs(cfg: Config, env = process.env): string[] {
+  const agent = cfg.agent ?? "claude";
+  const args = ["-e", `AGENT=${agent}`, "-e", `MODEL=${cfg.model}`];
+  if (agent === "claude") {
+    const key = env.CLAUDE_CODE_OAUTH_TOKEN ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY";
+    if (!env[key]) throw new Error("Weder CLAUDE_CODE_OAUTH_TOKEN noch ANTHROPIC_API_KEY gesetzt");
+    return [...args, "-e", key];
+  }
+  const key = env.CODEX_API_KEY ? "CODEX_API_KEY" : env.OPENAI_API_KEY ? "OPENAI_API_KEY" : null;
+  if (key) return [...args, "-e", key];
+  const dir = cfg.codexAuthDir;
+  if (!dir || !existsSync(join(dir, "auth.json"))) throw new Error("Codex braucht CODEX_API_KEY, OPENAI_API_KEY oder codexAuthDir mit auth.json (siehe docs/codex-setup.md)");
+  if (cfg.maxParallel !== 1) throw new Error("Codex mit ChatGPT-Login braucht maxParallel: 1, damit auth.json nicht gleichzeitig erneuert wird");
+  return [...args, "--mount", `type=bind,src=${dir},dst=/home/pwuser/.codex`];
 }
 
 async function run(cmd: string[], opts: { input?: string; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<string> {
@@ -136,9 +162,11 @@ const readJobJson = (path: string, maxBytes = 200_000): any => {
 /** Entfernt Zugangsdaten aus Texten, bevor sie öffentlich in GitHub landen. */
 export function redact(text: string): string {
   return text
-    .replace(/sk-ant-[A-Za-z0-9_-]+/g, "[Zugangsdaten entfernt]")
+    .replace(/\bsk-[A-Za-z0-9_-]+/g, "[Zugangsdaten entfernt]")
     .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, "[Zugangsdaten entfernt]")
-    .replace(/(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|GH_TOKEN|GITHUB_TOKEN)=\S+/g, "$1=[entfernt]");
+    .replace(/(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|CODEX_API_KEY|OPENAI_API_KEY|GH_TOKEN|GITHUB_TOKEN)=\S+/g, "$1=[entfernt]")
+    .replace(/("(?:access_token|refresh_token|id_token|CODEX_API_KEY|OPENAI_API_KEY)"\s*:\s*")[^"]+/g, "$1[entfernt]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[Zugangsdaten entfernt]");
 }
 
 // ---------- Dauerhafter Zustand pro Issue (nur für den Runner) ----------
@@ -290,6 +318,7 @@ async function listContainers(): Promise<Container[]> {
       name, repo: info.Config.Labels["sf.repo"], issue: Number(info.Config.Labels["sf.issue"]),
       phase: (info.Config.Labels["sf.phase"] ?? "build") as Phase,
       mode: info.Config.Labels["sf.mode"] ?? "new",
+      agent: info.Config.Labels["sf.agent"] ?? "claude", model: info.Config.Labels["sf.model"],
       finishedAt: info.State.FinishedAt,
       running: info.State.Running, startedAt: info.State.StartedAt, exitCode: info.State.ExitCode,
     });
@@ -353,7 +382,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
   const dir = jobDir(cfg, repo, issue.number);
   mkdirSync(dir, { recursive: true });
   chownSync(dir, CONTAINER_UID, CONTAINER_UID);
-  for (const f of ["status.json", "verify.json", "verify.md"]) rmSync(join(dir, f), { force: true });
+  for (const f of ["status.json", "verify.json", "verify.md", "claude.jsonl", "claude.err", "codex.jsonl", "codex.err"]) rmSync(join(dir, f), { force: true });
   writeJobFile(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra));
 
   if (phase === "check" && !issue.comments.some((c) => isFactoryComment(c) && c.body.includes(`${MARK}claimed`))) {
@@ -370,19 +399,19 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
   await syncBoard(cfg, issue.url, status);
 
   const ghToken = (await gh(["auth", "token"])).trim();
-  const authVar = process.env.CLAUDE_CODE_OAUTH_TOKEN ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY";
   await docker(["rm", "-f", name]).catch(() => {});
   await docker([
     "run", "-d", "--name", name,
     "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`, "--label", `sf.mode=${mode}`,
+    "--label", `sf.agent=${cfg.agent ?? "claude"}`, "--label", `sf.model=${cfg.model}`,
     ...agentLimits(cfg),
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
-    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
-    "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
+    ...agentDockerArgs(cfg), "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
+    "-e", "GH_TOKEN", // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
     "-v", `${dir}:/work`, ...scenarioMount,
     await imageFor(cfg, repo),
   ], { GH_TOKEN: ghToken });
-  log("job:started", { repo, issue: issue.number, phase, mode, container: name });
+  log("job:started", { repo, issue: issue.number, phase, mode, agent: cfg.agent ?? "claude", container: name });
 }
 
 /** Nach einem Bau-Lauf: Sind die Pflicht-Checks auf genau dem gepushten Stand grün und ist die Spec unverändert? */
@@ -405,13 +434,29 @@ async function checkBuild(repo: string, issue: number, dir: string, prUrl?: stri
   return null;
 }
 
+/** Beide CLI-Formate auf die vom Runner benötigten Felder reduzieren. Codex meldet keinen USD-Preis. */
+export function readAgentResult(dir: string, agent: Agent): any {
+  const tail = readJobFile(join(dir, `${agent}.jsonl`), 500_000) ?? "";
+  const events = tail.split("\n").flatMap((line) => {
+    try { const e = JSON.parse(line); return e && typeof e === "object" ? [e] : []; } catch { return []; }
+  });
+  if (agent === "claude") return events.findLast((e) => e.type === "result") ?? {};
+  const completed = events.filter((e) => e.type === "turn.completed");
+  const failure = events.findLast((e) => e.type === "turn.failed" || e.type === "error");
+  const message = events.findLast((e) => e.type === "item.completed" && e.item?.type === "agent_message");
+  return {
+    is_error: !!failure || completed.length === 0,
+    result: failure?.error?.message ?? failure?.message ?? message?.item.text,
+    usage: completed.at(-1)?.usage ?? null,
+  };
+}
+
 /** Wertet einen beendeten Container aus und räumt ihn weg. `reason` = Grund, warum der Runner ihn beendet hat. */
 async function finish(cfg: Config, c: Container, reason?: string) {
   const dir = jobDir(cfg, c.repo, c.issue);
   const status: { status?: string; step?: string; pr?: string; unresolved?: boolean } = readJobJson(join(dir, "status.json")) ?? {};
-  let result: any = {};
-  const tail = readJobFile(join(dir, "claude.jsonl"), 500_000) ?? "";
-  try { result = JSON.parse(tail.trim().split("\n").pop() ?? ""); } catch {}
+  const agent = c.agent ?? "claude";
+  const result = readAgentResult(dir, agent);
 
   const endStates: Record<Phase, string[]> = {
     check: ["approved", "question", "rejected", "failed"],
@@ -420,26 +465,26 @@ async function finish(cfg: Config, c: Container, reason?: string) {
   };
   let problem = reason ?? null;
   if (!problem && !(status.status && endStates[c.phase].includes(status.status))) problem = "Der Lauf hat kein Ergebnis gemeldet.";
-  if (!problem && (c.exitCode !== 0 || result.is_error)) problem = `Claude Code wurde mit einem Fehler beendet (Exit-Code ${c.exitCode}).`;
+  if (!problem && (c.exitCode !== 0 || result.is_error)) problem = `${agent === "codex" ? "Codex" : "Claude Code"} wurde mit einem Fehler beendet (Exit-Code ${c.exitCode}).`;
   if (!problem && c.phase === "build" && status.status === "accepting") problem = await checkBuild(c.repo, c.issue, dir, status.pr);
   const ended = !problem;
   const metricStatus = ended ? (status.status === "review" && status.unresolved ? "unresolved" : status.status) : "failed";
 
   log("job:finished", {
-    repo: c.repo, issue: c.issue, phase: c.phase, exitCode: c.exitCode, status: metricStatus, problem,
+    repo: c.repo, issue: c.issue, phase: c.phase, agent, exitCode: c.exitCode, status: metricStatus, problem,
     minutes: result.duration_ms ? Math.round(result.duration_ms / 60000) : null,
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null,
   });
-  const errTail = redact(readJobFile(join(dir, "claude.err"), 1500) ?? "");
+  const errTail = redact(readJobFile(join(dir, `${agent}.err`), 1500) ?? "");
   // Kurze Zusammenfassung des Laufs dauerhaft festhalten: Grundlage für den Verbesserungs-Lauf
   try {
     const runsDir = join(cfg.dataDir, "runs");
     mkdirSync(runsDir, { recursive: true });
     writeFileSync(join(runsDir, `${new Date().toISOString().replace(/[:.]/g, "-")}__${c.repo.replace("/", "__")}__${c.issue}__${c.phase}.json`), JSON.stringify({
-      repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode, exitCode: c.exitCode,
+      repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode, agent, exitCode: c.exitCode,
       status: metricStatus, problem, reported: status,
       result: typeof result.result === "string" ? redact(result.result.slice(0, 4000)) : null,
-      turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, errTail,
+      turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, usage: result.usage ?? null, errTail,
     }, null, 2));
   } catch (e) { log("runs:error", { error: String(e) }); }
   // Dauerhaft festhalten, auch nach dem Aufräumen: Grundlage für factory-stats
@@ -447,7 +492,8 @@ async function finish(cfg: Config, c: Container, reason?: string) {
   appendFileSync(join(cfg.dataDir, "metrics.jsonl"), JSON.stringify({
     t: new Date().toISOString(), repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode,
     status: metricStatus, exitCode: c.exitCode, seconds: Number.isFinite(seconds) ? seconds : null,
-    turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, model: cfg.model,
+    turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, agent, model: c.model ?? cfg.model,
+    usage: result.usage ?? null,
   }) + "\n");
 
   if (ended) {
@@ -629,10 +675,9 @@ async function maybeImprove(cfg: Config, freeSlots: number) {
   if (!existsSync(metrics)) writeFileSync(metrics, "");
   chownSync(work, CONTAINER_UID, CONTAINER_UID);
   const ghToken = (await gh(["auth", "token"])).trim();
-  const authVar = process.env.CLAUDE_CODE_OAUTH_TOKEN ? "CLAUDE_CODE_OAUTH_TOKEN" : "ANTHROPIC_API_KEY";
   await docker(["run", "-d", "--name", "sf-improve", "--label", "sf.improve=1",
     ...agentLimits(cfg),
-    "-e", `REPO=${cfg.factoryRepo}`, "-e", `MODEL=${cfg.model}`, "-e", "GH_TOKEN", "-e", authVar,
+    "-e", `REPO=${cfg.factoryRepo}`, ...agentDockerArgs(cfg), "-e", "GH_TOKEN",
     "-v", `${work}:/work`, "-v", `${runs}:/data/runs:ro`, "-v", `${metrics}:/data/metrics.jsonl:ro`,
     "--entrypoint", "/factory/improve.sh", cfg.image], { GH_TOKEN: ghToken });
   log("improve:started", { repo: cfg.factoryRepo });
@@ -778,11 +823,11 @@ async function tick(cfg: Config) {
 async function main() {
   const once = process.argv.includes("--once");
   let cfg = loadConfig();
-  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN && !process.env.ANTHROPIC_API_KEY) {
-    log("config:error", { error: "Weder CLAUDE_CODE_OAUTH_TOKEN noch ANTHROPIC_API_KEY gesetzt" });
+  try { agentDockerArgs(cfg); } catch (e) {
+    log("config:error", { error: String(e) });
     process.exit(1);
   }
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && process.env.ANTHROPIC_API_KEY) {
+  if ((cfg.agent ?? "claude") === "claude" && process.env.CLAUDE_CODE_OAUTH_TOKEN && process.env.ANTHROPIC_API_KEY) {
     log("config:warning", { warning: "Beide Login-Arten gesetzt. Es wird nur CLAUDE_CODE_OAUTH_TOKEN an die Jobs gegeben." });
   }
   CONTAINER_UID = Number((await docker(["run", "--rm", "--entrypoint", "id", cfg.image, "-u"])).trim());
@@ -791,11 +836,12 @@ async function main() {
   log("runner:started", {
     login: FACTORY_LOGIN, allowedUsers: cfg.allowedUsers ?? [],
     preview: cfg.preview ? previewLink(cfg, 1).replace(/:4001$/, ":4001…") : "aus",
-    containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow,
+    containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, agent: cfg.agent, model: cfg.model, workflow: cfg.workflow,
   });
   while (true) {
     try {
       cfg = loadConfig();
+      agentDockerArgs(cfg);
       await tick(cfg);
     } catch (e) {
       log("tick:error", { error: String(e) });

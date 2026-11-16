@@ -9,9 +9,9 @@ Schritt für Schritt vom leeren Server bis zum ersten Pull Request, den die Fact
 **Du brauchst:**
 
 - einen Hostinger VPS (empfohlen: **KVM 2** mit 2 CPU-Kernen und 8 GB RAM)
-- ein Claude-Abo (Pro, Max, Team oder Enterprise) **oder** einen Anthropic-API-Key
+- Zugang zu Codex über ein ChatGPT-Konto oder einen OpenAI-API-Key **oder** ein Claude-Abo / einen Anthropic-API-Key
 - einen GitHub-Account
-- auf deinem Rechner: [Claude Code](https://code.claude.com), `git` und die [GitHub CLI](https://cli.github.com) (`gh`)
+- auf deinem Rechner: Codex oder [Claude Code](https://code.claude.com), `git` und die [GitHub CLI](https://cli.github.com) (`gh`)
 
 ---
 
@@ -44,7 +44,7 @@ Alle Befehle in den Schritten 3 bis 6 führst du **auf dem Server** aus.
 ## 3. Die Factory installieren
 
 ```bash
-git clone https://github.com/AlexPEClub/software-factory.git /opt/software-factory
+git clone https://github.com/TheLuBu/software-factory.git /opt/software-factory
 cd /opt/software-factory
 ./setup.sh
 ```
@@ -56,6 +56,8 @@ Das Skript installiert Docker, die GitHub CLI und Bun, legt die Konfiguration un
 Am Ende listet es auf, was noch fehlt. Das sind die nächsten drei Schritte. Du kannst `./setup.sh` jederzeit erneut ausführen; schon Installiertes wird übersprungen.
 
 ## 4. Claude anmelden
+
+**Für Codex stattdessen:** [Codex-Setup](codex-setup.md) durchführen und danach bei Schritt 5 weitermachen. Dort sind ChatGPT-Anmeldung, API-Key, Agent-Auswahl und lokale Codex-Skills beschrieben. Die folgenden Claude-Schritte entfallen dann.
 
 Die Factory nutzt die offizielle Claude Code CLI mit deinem eigenen Login.
 
@@ -130,12 +132,12 @@ Ohne Domain funktioniert die Vorschau auch, dann aber nur über einfaches HTTP m
 
 ## 7. Deinen Rechner vorbereiten
 
-Ab hier arbeitest du **auf deinem Rechner**. Die Specs schreibst du lokal mit Claude Code; die Factory bekommt nur das fertige Ergebnis.
+Ab hier arbeitest du **auf deinem Rechner**. Die Specs schreibst du lokal mit Claude Code oder Codex; die Factory bekommt nur das fertige Ergebnis. Für Codex `./scripts/install-local-skills.sh codex` installieren und die folgenden Skills mit `$init`, `$write-spec` und `$to-factory` aufrufen (siehe [Codex-Setup](codex-setup.md)).
 
 Klone das Factory-Repo auch lokal und installiere die drei lokalen Skills:
 
 ```bash
-git clone https://github.com/AlexPEClub/software-factory.git
+git clone https://github.com/TheLuBu/software-factory.git
 cd software-factory
 ./scripts/install-local-skills.sh
 ```
@@ -265,7 +267,9 @@ Die Konfiguration liegt in `/etc/software-factory/config.json`. Die wichtigsten 
 | Feld | Standard | Bedeutung |
 |---|---|---|
 | `maxParallel` | `2` | Wie viele Agent-Läufe gleichzeitig laufen (Prüfung, Entwicklung, Abnahme, Verbesserung), über alle Repos zusammen |
-| `model` | `opus` | Modell für alle Agents |
+| `agent` | `claude` | `claude` oder `codex`, gilt für alle Phasen |
+| `model` | `opus` bei Claude, leer bei Codex | Modell für alle Agents; leer = CLI-Standard |
+| `codexAuthDir` | nicht gesetzt | Eigenes persistentes Codex-Login-Verzeichnis auf dem Server; ChatGPT-Anmeldung braucht `maxParallel: 1` |
 | `jobTimeoutMinutes` | `90` | Danach wird ein Lauf abgebrochen |
 | `containerMemory` | `3g` | Arbeitsspeicher pro Agent-Container |
 | `preview.max` | `1` | Gleichzeitige Vorschauen |

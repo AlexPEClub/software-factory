@@ -1,5 +1,5 @@
-# Job-Image: Jeder Factory-Job läuft in einem eigenen Container aus diesem Image.
-# Enthält Claude Code, GitHub CLI, git, Node und einen Chromium für Screenshots/E2E-Tests.
+# syntax=docker/dockerfile:1
+# Job-Image: Claude Code und Codex, GitHub CLI, Node und Chromium für Screenshots/E2E-Tests.
 FROM mcr.microsoft.com/playwright:v1.65.0-noble
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,7 +13,7 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/*
 
 # Playwright als globales Paket (Browser sind im Basis-Image schon vorhanden)
-RUN npm install -g playwright@1.65.0 && npm cache clean --force
+RUN npm install -g playwright@1.65.0 @openai/codex && npm cache clean --force
 ENV NODE_PATH=/usr/lib/node_modules
 
 # Factory-Werkzeuge, Playbook und Workflow

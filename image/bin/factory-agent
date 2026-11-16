@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Gemeinsamer CLI-Aufruf für Jobs und Verbesserungsläufe. Prompt von stdin, Playbook als Argument.
+set -euo pipefail
+PLAYBOOK="${1:?Playbook fehlt}"
+AGENT="${AGENT:-claude}"
+WORK="${FACTORY_WORK:-/work}"
+case "$AGENT" in
+  claude)
+    ARGS=(claude -p "$(cat)" --append-system-prompt-file "$PLAYBOOK"
+      --model "${MODEL:-opus}" --dangerously-skip-permissions --output-format stream-json --verbose)
+    if [ -n "${WORKFLOW:-}" ]; then ARGS+=(--add-dir "/factory/workflows/$WORKFLOW"); fi
+    ;;
+  codex)
+    # Der Docker-Container ist die Isolation: git, Netzwerk, /work und /scenarios müssen nutzbar sein.
+    ARGS=(codex exec --sandbox danger-full-access -c 'approval_policy="never"'
+      -c 'shell_environment_policy.ignore_default_excludes=true'
+      -c 'project_doc_fallback_filenames=["CLAUDE.md"]'
+      -c 'cli_auth_credentials_store="file"' -c "developer_instructions=$(jq -Rs . < "$PLAYBOOK")"
+      --ephemeral --json)
+    if [ -n "${MODEL:-}" ]; then ARGS+=(--model "$MODEL"); fi
+    ARGS+=(-)
+    if [ -z "${CODEX_API_KEY:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then export CODEX_API_KEY="$OPENAI_API_KEY"; fi
+    ;;
+  *) echo "Unbekannter Agent: $AGENT (erlaubt: claude, codex)" >&2; exit 2 ;;
+esac
+set +e
+"${ARGS[@]}" > "$WORK/$AGENT.jsonl" 2> "$WORK/$AGENT.err"
+CODE=$?
+set -e
+tail -n 50 "$WORK/$AGENT.jsonl" | jq -Rr '
+  fromjson? | if .type == "result" then .result
+  elif .type == "item.completed" and .item.type == "agent_message" then .item.text
+  else empty end | tostring | .[0:800]' || true
+exit "$CODE"

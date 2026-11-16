@@ -1,5 +1,5 @@
 // Regressionstests für die sicherheitsrelevanten Teile des Runners und für factory-verify.
-// Ausführen: node --test runner/main.test.ts   (Node 22.6+; braucht kein GitHub, kein Docker, keine Tokens)
+// Ausführen: node --test runner/main.test.ts   (Linux, Node 22.18+; braucht kein GitHub, kein Docker, keine Tokens)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildPrompt, caddyConfig, humanCommentsSinceFactory, lastFactoryMarker, readJobFile, redact,
-  reworksSinceApproval, setFactoryLogin, writeJobFile, type Config,
+  reworksSinceApproval, setFactoryLogin, writeJobFile, type Config, type Agent,
 } from "./main.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "sf-test-"));
@@ -165,19 +165,49 @@ let headSha = "abc1234";
   },
 };
 
-async function finishRun(phase: "check" | "build" | "accept", files: Record<string, string>, exitCode = 0, reason?: string) {
+async function finishRun(phase: "check" | "build" | "accept", files: Record<string, string>, exitCode = 0, reason?: string, agent: Agent = "claude") {
   const config = cfg();
   const dir = join(config.dataDir, "jobs", "a__b__7");
   mkdirSync(dir, { recursive: true });
   for (const [f, content] of Object.entries(files)) writeFileSync(join(dir, f), content);
   calls.length = 0;
-  await finish(config, { name: "sf-a-b-7", repo: "a/b", issue: 7, phase, mode: "new", running: false,
+  await finish(config, { name: "sf-a-b-7", repo: "a/b", issue: 7, phase, mode: "new", agent, running: false,
     startedAt: "2026-11-11T10:00:00Z", finishedAt: "2026-11-11T10:05:00Z", exitCode }, reason);
   const metric = JSON.parse(readFileSync(join(config.dataDir, "metrics.jsonl"), "utf8").trim());
   const failedComment = calls.find((x) => x.cmd[1] === "issue" && x.cmd[2] === "comment")?.stdin ?? "";
   return { metric, failedComment, dir };
 }
 const result = (extra = {}) => JSON.stringify({ type: "result", result: "fertig", num_turns: 3, ...extra }) + "\n";
+
+test("Codex-Abnahme zählt trotz zwischenzeitlichem Wechsel der Konfiguration zum ursprünglichen Agent", async () => {
+  const stream = '{"type":"item.completed","item":{"type":"agent_message","text":"Fertig"}}\n{"type":"turn.completed","usage":{"input_tokens":50,"output_tokens":10}}\n';
+  const r = await finishRun("accept", { "status.json": '{"status":"review"}', "codex.jsonl": stream }, 0, undefined, "codex");
+  assert.equal(r.metric.status, "review");
+  assert.equal(r.metric.agent, "codex");
+  assert.equal(r.metric.costUsd, null);
+  assert.equal(r.metric.usage.input_tokens, 50);
+});
+
+test("Codex-Fehler und unvollständige Streams zählen trotz Erfolgsmeldung als Fehlschlag", async () => {
+  for (const stream of ['{"type":"turn.failed","error":{"message":"Limit"}}\n', ""]) {
+    const r = await finishRun("accept", { "status.json": '{"status":"review"}', "codex.jsonl": stream }, 0, undefined, "codex");
+    assert.equal(r.metric.status, "failed");
+    assert.ok(r.failedComment.includes("Codex"));
+  }
+});
+
+test("Codex durchläuft Prüfung und dieselben verpflichtenden Bau-Checks wie Claude", async () => {
+  const stream = '{"type":"turn.completed","usage":{"input_tokens":50,"output_tokens":10}}\n';
+  const check = await finishRun("check", { "status.json": '{"status":"approved"}', "codex.jsonl": stream }, 0, undefined, "codex");
+  assert.equal(check.metric.status, "approved");
+  const missing = await finishRun("build", { "status.json": '{"status":"accepting","pr":"https://x/pull/1"}', "codex.jsonl": stream }, 0, undefined, "codex");
+  assert.equal(missing.metric.status, "failed");
+  const built = await finishRun("build", { "status.json": '{"status":"accepting","pr":"https://x/pull/1"}', "codex.jsonl": stream,
+    "verify.json": JSON.stringify({ sha: headSha, ok: true, results: [{ name: "lint", exit: 0 }] }) }, 0, undefined, "codex");
+  assert.equal(built.metric.status, "accepting");
+  const failed = await finishRun("accept", { "status.json": '{"status":"review"}', "codex.jsonl": stream }, 7, undefined, "codex");
+  assert.equal(failed.metric.status, "failed");
+});
 
 test("Bau ohne Prüfergebnis gilt nicht als gebaut", async () => {
   const r = await finishRun("build", { "status.json": '{"status":"accepting","pr":"https://x/pull/1"}', "claude.jsonl": result() });

@@ -1,6 +1,8 @@
 # Software Factory
 
-Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft.
+Eine Software Factory mit wahlweise Claude Code oder OpenAI Codex, die rund um die Uhr auf deinem eigenen Server läuft.
+
+**Nur Codex verfügbar?** Einrichtung mit eurem ChatGPT-Konto oder einem API-Key: [Codex-Setup und Agent-Auswahl](docs/codex-setup.md).
 
 > 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS. Getestet ist sie auf dem **Hostinger KVM 2** (2 CPU-Kerne, 8 GB RAM) mit der Vorlage „Ubuntu 24.04 mit Claude Code“.
 > Server holen: **[hostinger.com/alexclaude](https://hostinger.com/alexclaude)**. Mit dem Code **`ALEXCLAUDE`** sparst du zusätzlich 10 %.
@@ -10,8 +12,8 @@ Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Se
 
 **Du entscheidest, was gebaut wird. Die Factory baut es.**
 
-1. Du schreibst lokal mit Claude Code die Spec (`/write-spec`), prüfst sie und pushst sie.
-2. Du übergibst sie mit `/to-factory` an die Factory. Das legt ein GitHub Issue mit Label `factory` an, das auf die Spec zeigt.
+1. Du schreibst lokal mit Claude Code (`/write-spec`) oder Codex (`$write-spec`) die Spec, prüfst sie und pushst sie.
+2. Du übergibst sie mit `/to-factory` (Claude) oder `$to-factory` (Codex) an die Factory. Das legt ein GitHub Issue mit Label `factory` an, das auf die Spec zeigt.
 3. Ein Agent auf deinem Server prüft die Spec und schreibt Testszenarien. Ein zweiter Agent entwickelt: Architektur, Umsetzung, Tests, Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ein dritter, unabhängiger Agent nimmt das Ergebnis mit den Testszenarien ab, die der Entwickler nie gesehen hat. Ist etwas unklar, fragt die Factory im Issue nach und macht weiter, sobald du antwortest.
 4. Du prüfst den Pull Request und mergst. **Gemergt wird immer von dir.**
 
@@ -31,7 +33,7 @@ Runner auf deinem Server ── prüft jede Minute die Issues
         │
         ▼
 Eigener Docker-Container pro Issue
-  └─ Claude Code + Playbook + Workflow-Skills
+  └─ Claude Code oder Codex + Playbook + Workflow-Skills
        Triage → Analyse → Umsetzung → Prüfung → Pull Request
         │
         ├─ unklar?  → Frage als Kommentar im Issue, wartet auf dich
@@ -42,33 +44,33 @@ Eigener Docker-Container pro Issue
 ```
 
 - **Runner** (`runner/`): kleiner Dienst auf dem Server. Holt Issues, startet Container, setzt Labels und Board-Status. Schreibt selbst keinen Code.
-- **Job-Image** (`image/`): Claude Code, GitHub CLI, git, Node und Chromium (für Tests und Screenshots).
+- **Job-Image** (`image/`): Claude Code und Codex CLI, GitHub CLI, git, Node und Chromium (für Tests und Screenshots).
 - **Playbook** (`playbooks/factory.md`): die festen Regeln für jeden Lauf. Stages melden, bei Unklarheit fragen statt raten, Pflicht-Checks, nie selbst mergen.
 - **Workflow** (`workflows/starter-kit/`): wie entwickelt wird. Standard ist der Workflow aus dem [AI Coding Starter Kit](https://github.com/AlexPEClub/ai-coding-starter-kit): `architecture → build → qa` auf Basis deiner Spec, mit getrennten Dateien pro Feature (`spec.md`, `design.md`, `qa-report.md`). Austauschbar, siehe [workflow.md](workflows/starter-kit/workflow.md).
 - **Stack-Packs** (`workflows/starter-kit/stacks/`): Regeln für einen bestimmten Stack (z. B. `nextjs`, `supabase`). Welche gelten, steht in `docs/stack.md` des Projekts. Die Factory ist stack-unabhängig.
-- **Lokale Skills** (`local-skills/`): `init` (Projekt aufsetzen inkl. Stack), `write-spec` (Spec im Interview erarbeiten), `to-factory` (an die Factory übergeben). Einmal pro Rechner installieren: `./scripts/install-local-skills.sh`.
+- **Lokale Skills** (`local-skills/`): `init` (Projekt aufsetzen inkl. Stack), `write-spec` (Spec im Interview erarbeiten), `to-factory` (an die Factory übergeben). Einmal pro Rechner installieren: `./scripts/install-local-skills.sh claude`, `codex` oder `both`.
 - **Projekt-Vorlage**: [factory-template](https://github.com/AlexPEClub/factory-template), stack-unabhängig. Neues Projekt: `./scripts/new-project.sh mein-projekt`.
 
 ## Voraussetzungen
 
 - Ein Linux-Server mit Ubuntu 24.04, mindestens 2 vCPU und 8 GB RAM
-- Ein Claude-Abo (Pro, Max, Team oder Enterprise) **oder** ein Anthropic-API-Key
+- Zugang zu Codex über ein ChatGPT-Konto oder einen OpenAI-API-Key **oder** ein Claude-Abo / einen Anthropic-API-Key
 - Ein GitHub-Account
 
 ## Schnellstart
 
 ```bash
-git clone https://github.com/AlexPEClub/software-factory.git /opt/software-factory
+git clone https://github.com/TheLuBu/software-factory.git /opt/software-factory
 cd /opt/software-factory
 ./setup.sh
 ```
 
 Danach:
-1. **Claude-Login:** auf deinem Rechner `claude setup-token` ausführen und den Token als `CLAUDE_CODE_OAUTH_TOKEN=...` in `/etc/software-factory/secrets.env` eintragen
+1. **Agent wählen und anmelden:** Für Codex `agent: "codex"` und `model: ""` in `/etc/software-factory/config.json` setzen, dann dem [Codex-Setup](docs/codex-setup.md) folgen. Für Claude bleibt `agent: "claude"`, `model: "opus"`: auf deinem Rechner `claude setup-token` ausführen und den Token als `CLAUDE_CODE_OAUTH_TOKEN=...` in `/etc/software-factory/secrets.env` eintragen.
 2. **GitHub-Login** auf dem Server: `gh auth login -s project`
 3. **Factory starten:** `systemctl restart software-factory`
-4. **Auf deinem Rechner:** `./scripts/install-local-skills.sh`, dann `FACTORY_SERVER=root@DEINE-IP ./scripts/new-project.sh mein-projekt`. Legt das Repo aus der Vorlage an und bindet es samt Labels und Kanban-Board an die Factory an. Ein bestehendes Repo bindest du stattdessen auf dem Server mit `./scripts/add-repo.sh dein-name/dein-repo` an.
-5. Im Projekt: Briefing in `docs/briefing.md` → `/init` → pro Feature `/write-spec` → `/to-factory`
+4. **Auf deinem Rechner:** `./scripts/install-local-skills.sh codex` (oder `claude`), dann `FACTORY_SERVER=root@DEINE-IP ./scripts/new-project.sh mein-projekt`. Legt das Repo aus der Vorlage an und bindet es samt Labels und Kanban-Board an die Factory an. Ein bestehendes Repo bindest du stattdessen auf dem Server mit `./scripts/add-repo.sh dein-name/dein-repo` an.
+5. Im Projekt: Briefing in `docs/briefing.md` → `$init` → pro Feature `$write-spec` → `$to-factory` (Claude: dieselben Namen mit `/` statt `$`).
 
 Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger): [docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md).
 
@@ -100,7 +102,7 @@ Die Factory liest `.factory/setup.json` im Ziel-Repo:
 }
 ```
 
-`/init` legt sie passend zum Stack an. Braucht dein Stack eine andere Laufzeit als Node oder Python, ergänzt `/init` eine `.factory/Dockerfile`, die auf dem Factory-Image aufbaut.
+Der lokale Skill `init` legt sie passend zum Stack an. Braucht dein Stack eine andere Laufzeit als Node oder Python, ergänzt er eine `.factory/Dockerfile`, die auf dem Factory-Image aufbaut.
 
 ## Claude-Abo: was ist erlaubt?
 
@@ -119,7 +121,7 @@ Die Factory startet die **unveränderte, offizielle Claude Code CLI** auf deinem
 - Die Agents arbeiten mit deinem GitHub-Login. Für mehr Trennung: eigener GitHub-Account für die Factory oder ein Fine-grained Token, der nur deine Factory-Repos erreicht.
 - Getestet: Ubuntu 24.04 auf Hostinger KVM 2, Next.js-Projekte. Weitere Stacks sind vorgesehen, aber noch nicht erprobt.
 
-Tests für den Runner: `node --test runner/main.test.ts` (Node 22.6+, ohne GitHub und Docker).
+Tests für den Runner und beide CLI-Anbindungen: `node --test runner/*.test.ts` (Linux, Node 22.18+, Bash, git und jq; ohne GitHub, Docker und Modellaufrufe).
 
 ## Lizenz
 

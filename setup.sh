@@ -79,7 +79,23 @@ systemctl enable software-factory >/dev/null 2>&1
 
 # Was fehlt noch?
 MISSING=()
-grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.' "$CONF_DIR/secrets.env" || MISSING+=("Claude-Login: Token in $CONF_DIR/secrets.env (siehe Anleitung)")
+AGENT=$(jq -r '.agent // "claude"' "$CONF_DIR/config.json")
+case "$AGENT" in
+  claude)
+    grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.' "$CONF_DIR/secrets.env" || MISSING+=("Claude-Login: Token in $CONF_DIR/secrets.env (siehe Anleitung)")
+    ;;
+  codex)
+    if ! grep -qE '^(CODEX_API_KEY|OPENAI_API_KEY)=.' "$CONF_DIR/secrets.env"; then
+      AUTH_DIR=$(jq -r '.codexAuthDir // empty' "$CONF_DIR/config.json")
+      if [ ! -f "$AUTH_DIR/auth.json" ]; then
+        MISSING+=("Codex-Login: API-Key oder ChatGPT-Anmeldung einrichten (docs/codex-setup.md)")
+      elif [ "$(jq -r '.maxParallel // 2' "$CONF_DIR/config.json")" != 1 ]; then
+        MISSING+=("Codex mit ChatGPT-Login: maxParallel auf 1 setzen (docs/codex-setup.md)")
+      fi
+    fi
+    ;;
+  *) MISSING+=("Ungültiger agent: $AGENT (erlaubt: claude, codex)") ;;
+esac
 gh auth status >/dev/null 2>&1 || MISSING+=("GitHub-Login: gh auth login -s project")
 jq -e '.repos | map(select(. != "DEIN-GITHUB-NAME/dein-repo")) | length > 0' "$CONF_DIR/config.json" >/dev/null || MISSING+=("Repo anbinden: ./scripts/add-repo.sh besitzer/repo")
 
