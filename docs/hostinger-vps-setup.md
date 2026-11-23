@@ -209,6 +209,7 @@ Innerhalb einer Minute übernimmt die Factory. Den Fortschritt siehst du auf dem
 | **Review** | Pull Request mit Belegen und Vorschau ist fertig | Prüfen und mergen |
 | **Fertig** | Gemergt | – |
 | **Fehlgeschlagen** | Technisch hängen geblieben | Im Issue kommentieren, dann versucht die Factory es erneut |
+| **Pausiert** | Nutzungslimit von Claude Code erreicht. Bis zum Reset startet die Factory für kein Issue einen Lauf. Danach setzt sie den Lauf automatisch fort, mit derselben Session und demselben Arbeitsstand (höchstens fünfmal) | – |
 
 Bei jeder Rückfrage, Ablehnung oder Fehlermeldung genügt ein Kommentar im Issue. Die Factory sieht ihn beim nächsten Durchlauf und macht weiter.
 
@@ -303,7 +304,7 @@ Der Standard `maxParallel: 2` passt zum KVM 2: zwei Läufe mit je bis zu 3 GB pl
 | `board:error` in den Logs | `gh auth refresh -s project`, dann `systemctl restart software-factory` |
 | Status **Fehlgeschlagen** | Der Fehler steht als Kommentar im Issue. Ursache beheben, dann im Issue kommentieren |
 | Vorschau lädt nicht | Nach jedem neuen Stand braucht sie 1–2 Minuten. Ist schon eine Vorschau aktiv (`preview.max`), bekommt der PR keine weitere. Mit Domain: Zeigt die Subdomain auf den Server und sind Port 80 und 443 offen? |
-| Claude-Limit erreicht | Die Läufe schlagen fehl, bis dein Limit zurückgesetzt ist. `maxParallel` senken oder auf API-Key umsteigen |
+| Claude-Limit erreicht | Das Issue steht auf **Pausiert**, die Factory macht nach dem Reset von selbst weiter. Früher fortsetzen: `/var/lib/software-factory/limit.json` löschen und im Issue kommentieren. Passiert es oft: `maxParallel` senken oder auf API-Key umsteigen |
 | Neue Version der Factory holen | `factory-rollout` |
 
 ## Was die Factory nie tut

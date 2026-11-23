@@ -38,7 +38,7 @@ type Comment = { author: { login: string } | null; body: string; createdAt: stri
 type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
 type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
 type Phase = "check" | "build" | "accept";
-type Mode = "new" | "answer" | "change-request" | "retry" | "rework";
+type Mode = "new" | "answer" | "change-request" | "retry" | "rework" | "resume";
 
 const CONFIG_PATH = process.env.FACTORY_CONFIG ?? "/etc/software-factory/config.json";
 const MARK = "<!-- software-factory:";
@@ -54,6 +54,7 @@ const STATUS: Record<string, { name: string; color: string; description: string 
   review: { name: "Review", color: "PINK", description: "PR und Vorschau sind bereit, du bist dran" },
   done: { name: "Fertig", color: "GREEN", description: "Gemergt" },
   failed: { name: "Fehlgeschlagen", color: "RED", description: "Technisch hängen geblieben, Kommentar startet neuen Versuch" },
+  paused: { name: "Pausiert", color: "GRAY", description: "Nutzungslimit erreicht, setzt nach dem Reset automatisch fort" },
 };
 const STEPS: Record<string, string> = { architecture: "Architektur", implementing: "Umsetzung", verifying: "Tests" };
 // Alte Labels (vor dem neuen Status-Modell) → neue
@@ -141,9 +142,85 @@ export function redact(text: string): string {
     .replace(/(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|GH_TOKEN|GITHUB_TOKEN)=\S+/g, "$1=[entfernt]");
 }
 
+// ---------- Nutzungslimit von Claude Code ----------
+// Übernommen aus dem Fork AndrewSteel/software-factory (Commit e16739e), angepasst.
+
+/** So oft setzt die Factory einen Lauf nach dem Nutzungslimit fort, danach entscheidet der Mensch. */
+const MAX_RESUMES = 5;
+const RESUME_BUFFER_MS = 5 * 60_000;
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** Ortszeit in Zeitzone `tz` → UTC-Millisekunden. Unbekannte Zeitzone: als UTC gelesen. */
+function zonedToUtc(y: number, mo: number, d: number, h: number, mi: number, tz: string): number {
+  const guess = Date.UTC(y, mo, d, h, mi);
+  try {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+      timeZone: tz, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric",
+    }).formatToParts(new Date(guess)).map((p) => [p.type, p.value]));
+    const asZoned = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute);
+    return guess - (asZoned - guess);
+  } catch { return guess; }
+}
+
+/** Heutiges Datum in Zeitzone `tz`. */
+function todayIn(now: Date, tz: string): [number, number, number] {
+  try {
+    const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "numeric", day: "numeric" })
+      .formatToParts(now).map((x) => [x.type, x.value]));
+    return [+p.year, +p.month - 1, +p.day];
+  } catch { return [now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()]; }
+}
+
+/**
+ * Erkennt in der letzten Ausgabe von Claude Code ein Nutzungs- oder Ausgabenlimit, z. B.
+ * "You've hit your 5-hour limit · resets 1:40am (UTC)" oder
+ * "You've hit your individual spend limit · ask your admin … · your 5-hour limit resets 9:30pm (UTC)",
+ * und liefert den Zeitpunkt zum Fortsetzen (Reset + Puffer). Ohne lesbare Reset-Zeit: in einer Stunde. Kein Limit: null.
+ */
+export function limitResumeAt(text: string, now = new Date()): Date | null {
+  if (!/hit your [\w\s-]*limit|usage limit reached/i.test(text)) return null;
+  const epoch = text.match(/limit reached\|(\d{10,13})/i);
+  if (epoch) {
+    const ms = epoch[1].length === 10 ? Number(epoch[1]) * 1000 : Number(epoch[1]);
+    return new Date(Math.max(ms, now.getTime()) + RESUME_BUFFER_MS);
+  }
+  const m = text.match(/resets\s+(?:at\s+)?(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i);
+  if (!m) return new Date(now.getTime() + 60 * 60_000);
+  const tz = m[6]?.trim() || "UTC";
+  let hour = Number(m[3]) % 24;
+  const ampm = m[5]?.toLowerCase();
+  if (ampm === "pm" && hour < 12) hour += 12;
+  if (ampm === "am" && hour === 12) hour = 0;
+  const minute = Number(m[4] ?? 0);
+  let at: number;
+  const month = m[1] ? MONTHS.indexOf(m[1].toLowerCase()) : -1;
+  if (month >= 0) {
+    const [year] = todayIn(now, tz);
+    at = zonedToUtc(year, month, Number(m[2]), hour, minute, tz);
+    if (at < now.getTime() - 24 * 3600_000) at = zonedToUtc(year + 1, month, Number(m[2]), hour, minute, tz); // Jahreswechsel
+  } else {
+    const [y, mo, d] = todayIn(now, tz);
+    at = zonedToUtc(y, mo, d, hour, minute, tz);
+    if (at <= now.getTime()) at = zonedToUtc(y, mo, d + 1, hour, minute, tz);
+  }
+  return new Date(Math.max(at, now.getTime()) + RESUME_BUFFER_MS);
+}
+
+/** Globale Sperre: Das Kontingent gehört zum Abo, nicht zum Issue. Bis zu diesem Zeitpunkt startet der Runner keinen Lauf. */
+const limitFile = (cfg: Config) => join(cfg.dataDir, "limit.json");
+export function limitUntil(cfg: Config): number {
+  try { return Date.parse(JSON.parse(readFileSync(limitFile(cfg), "utf8")).until) || 0; } catch { return 0; }
+}
+function setLimitUntil(cfg: Config, at: Date) {
+  if (at.getTime() <= limitUntil(cfg)) return; // nie verkürzen
+  writeFileSync(limitFile(cfg), JSON.stringify({ until: at.toISOString() }));
+  log("limit:paused", { until: at.toISOString() });
+}
+
 // ---------- Dauerhafter Zustand pro Issue (nur für den Runner) ----------
 
-type IssueState = { lostRetries?: number };
+/** resume: Lauf wurde vom Nutzungslimit unterbrochen und wird ab `at` mit demselben Arbeitsstand fortgesetzt. */
+type IssueState = { lostRetries?: number; resume?: { at: string; phase: Phase; count: number } };
 const stateFile = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "state", `${repo.replace("/", "__")}__${n}.json`);
 function getState(cfg: Config, repo: string, n: number): IssueState {
   try { return JSON.parse(readFileSync(stateFile(cfg, repo, n), "utf8")); } catch { return {}; }
@@ -306,6 +383,7 @@ export function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phas
     "change-request": `Änderungswunsch zum offenen PR ${prUrl ?? ""} (siehe letzte Kommentare). Arbeite auf demselben Branch weiter, keinen neuen PR öffnen.`,
     retry: "Erneuter Versuch nach einem Fehler (siehe letzte Kommentare für Hinweise)",
     rework: `Rückgabe aus der Abnahme: Behebe die Befunde aus dem letzten Kommentar „Abnahme nicht bestanden" am offenen PR ${prUrl ?? ""}.`,
+    resume: `Fortsetzung nach dem Nutzungslimit: Der vorige Lauf dieser Phase wurde unterbrochen. Sein Arbeitsstand liegt unverändert in /work/repo (lokaler Branch, auch nicht gepushte Commits und uncommittete Änderungen). Prüfe mit git status und git log, was schon erledigt ist, und mach dort weiter, statt neu zu beginnen.${prUrl ? ` Offener PR: ${prUrl}` : ""}`,
   };
   // Kommentare von nicht berechtigten Personen bekommt der Agent nicht zu sehen
   const comments = issue.comments.map((c) => {
@@ -381,6 +459,7 @@ export async function launch(cfg: Config, repo: string, issue: Issue, phase: Pha
     ...agentLimits(cfg),
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
     "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
+    ...(mode === "resume" ? ["-e", "RESUME=1"] : []),
     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
     "-v", `${dir}:/work`, ...scenarioMount,
     await imageFor(cfg, repo),
@@ -426,14 +505,20 @@ async function finish(cfg: Config, c: Container, reason?: string) {
   if (!problem && (c.exitCode !== 0 || result.is_error)) problem = `Claude Code wurde mit einem Fehler beendet (Exit-Code ${c.exitCode}).`;
   if (!problem && c.phase === "build" && status.status === "accepting") problem = await checkBuild(c.repo, c.issue, dir, status.pr);
   const ended = !problem;
-  const metricStatus = ended ? (status.status === "review" && status.unresolved ? "unresolved" : status.status) : "failed";
+  const errTail = redact(readJobFile(join(dir, "claude.err"), 1500) ?? "");
+  // Vom Nutzungslimit unterbrochen (nicht vom Runner beendet): später mit demselben Arbeitsstand fortsetzen
+  const state = getState(cfg, c.repo, c.issue);
+  const resumeAt = !ended && !reason ? limitResumeAt(`${typeof result.result === "string" ? result.result : ""}\n${errTail}`) : null;
+  const resumeCount = (state.resume?.count ?? 0) + 1;
+  const pause = resumeAt && resumeCount <= MAX_RESUMES;
+  if (resumeAt && !pause) problem = `Nutzungslimit erreicht, der Lauf wurde bereits ${MAX_RESUMES}-mal fortgesetzt.`;
+  const metricStatus = ended ? (status.status === "review" && status.unresolved ? "unresolved" : status.status) : pause ? "paused" : "failed";
 
   log("job:finished", {
     repo: c.repo, issue: c.issue, phase: c.phase, exitCode: c.exitCode, status: metricStatus, problem,
     minutes: result.duration_ms ? Math.round(result.duration_ms / 60000) : null,
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null,
   });
-  const errTail = redact(readJobFile(join(dir, "claude.err"), 1500) ?? "");
   // Bricht der Job vor Claude ab (Klonen, Checkout …), steht der Grund nur im Log des Containers
   const containerLog = redact((await docker(["logs", "--tail", "40", c.name]).catch(() => "")).slice(-1500));
   // Kurze Zusammenfassung des Laufs dauerhaft festhalten: Grundlage für den Verbesserungs-Lauf
@@ -457,11 +542,23 @@ async function finish(cfg: Config, c: Container, reason?: string) {
 
   if (ended) {
     setState(cfg, c.repo, c.issue, {});
+  } else if (pause && resumeAt) {
+    setLimitUntil(cfg, resumeAt);
+    setState(cfg, c.repo, c.issue, { ...state, resume: { at: resumeAt.toISOString(), phase: c.phase, count: resumeCount } });
+    const issue = JSON.parse(await gh(["issue", "view", String(c.issue), "-R", c.repo, "--json", "number,title,body,url,labels,comments"]));
+    await setStage(c.repo, issue, "paused");
+    await syncBoard(cfg, issue.url, "paused");
+    const when = resumeAt.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+    await comment(c.repo, c.issue, `paused:${c.phase}`,
+      `### ⏸️ Nutzungslimit erreicht\n\nDer Lauf wurde vom Nutzungslimit von Claude Code unterbrochen. Die Factory setzt ihn **ab ${when}** automatisch fort, ` +
+      `mit derselben Claude-Session und dem bisherigen Arbeitsstand (Fortsetzung ${resumeCount} von ${MAX_RESUMES}).\n\n` +
+      `_Bis dahin startet die Factory auch für andere Issues keinen Lauf._`);
   } else {
     let detail = typeof result.result === "string" ? result.result.slice(-1500) : "";
     if (!detail) detail = errTail.slice(-800);
     if (!detail) detail = containerLog.slice(-800);
     detail = redact(detail).replace(/```/g, "'''").trim();
+    if (state.resume) setState(cfg, c.repo, c.issue, { ...state, resume: undefined });
     const issue = JSON.parse(await gh(["issue", "view", String(c.issue), "-R", c.repo, "--json", "number,title,body,url,labels,comments"]));
     await setStage(c.repo, issue, "failed");
     await syncBoard(cfg, issue.url, "failed");
@@ -726,6 +823,13 @@ async function tickRepo(cfg: Config, repo: string, containers: Container[], slot
     else if (answered && current === "question") { phase = (marker?.phase as Phase) ?? "check"; mode = "answer"; }
     else if (answered && current === "rejected") { phase = "check"; mode = "answer"; }
     else if (answered && current === "failed") { phase = (marker?.phase as Phase) ?? "build"; mode = "retry"; }
+    else if (current === "paused") {
+      const r = getState(cfg, repo, issue.number).resume;
+      if (r && !answered && Date.now() < Date.parse(r.at)) continue;                           // Limit noch nicht zurückgesetzt
+      phase = r?.phase ?? (marker?.phase as Phase) ?? "build";
+      mode = "resume";
+      if (phase !== "check") prUrl = (await findPr(repo, issue.number, "open"))?.url;
+    }
     else if (answered && current === "review") {
       prUrl = (await findPr(repo, issue.number, "open"))?.url;
       if (prUrl) { phase = "build"; mode = "change-request"; }
@@ -770,7 +874,9 @@ async function tick(cfg: Config) {
   }
   containers = (await listContainers()).filter((c) => c.running);
   const improving = await improveRunning(cfg);
-  const slots = { free: cfg.maxParallel - containers.length - (improving ? 1 : 0) };
+  // Nutzungslimit aktiv: keine neuen Läufe und keine Fortsetzungen. Laufende Jobs, Labels und Board werden weiter gepflegt.
+  const limited = Date.now() < limitUntil(cfg);
+  const slots = { free: limited ? 0 : cfg.maxParallel - containers.length - (improving ? 1 : 0) };
 
   // Ein fehlerhaftes Repo darf die anderen nicht blockieren
   for (const repo of cfg.repos) {
