@@ -3,6 +3,9 @@
 # Erwartet: REPO, ISSUE, BRANCH, MODEL, WORKFLOW, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN (oder ANTHROPIC_API_KEY)
 # und /work/prompt.md (vom Runner geschrieben).
 set -euo pipefail
+# Fehlermeldungen (git, gh …) ins selbe Log wie die übrigen Ausgaben: Der Runner zeigt dessen Ende,
+# wenn der Job abbricht, bevor Claude startet. Claude selbst schreibt weiter nach /work/claude.err.
+exec 2>&1
 
 log() { echo "[factory] $*"; }
 
@@ -32,6 +35,13 @@ fi
 cd repo
 git fetch --quiet origin
 DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
+# Ein abgebrochener Lauf (Limit erreicht, Zeitlimit, Server-Neustart) kann unfertige Änderungen hinterlassen.
+# Sie würden den Checkout blockieren; deshalb kommen sie in den Stash und bleiben dort wiederherstellbar.
+if [ -n "$(git status --porcelain)" ]; then
+  log "Unfertige Änderungen eines früheren Laufs gefunden, lege sie im Stash ab"
+  git stash push --quiet --include-untracked -m "factory: Reste vor Lauf $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    || { log "Stash nicht möglich, verwerfe die Reste"; git reset --quiet --hard; git clean -ffdq; }
+fi
 if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
   git checkout --quiet -B "$BRANCH" "origin/$BRANCH"
   # Die Abnahme startet immer mit genau dem gepushten Stand, ohne Reste früherer Läufe

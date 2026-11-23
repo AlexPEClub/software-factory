@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -145,11 +145,12 @@ test("factory-verify: grün nur, wenn alle Checks bestehen", () => {
 
 // ---------- Auswertung eines beendeten Laufs (GitHub und Docker simuliert) ----------
 
-import { finish } from "./main.ts";
+import { finish, launch, JOB_OUTPUTS } from "./main.ts";
 
 type Call = { cmd: string[]; stdin: string };
 const calls: Call[] = [];
 let headSha = "abc1234";
+let containerLog = "";
 (globalThis as any).Bun = {
   spawn(cmd: string[], opts: any) {
     const call: Call = { cmd, stdin: "" };
@@ -158,6 +159,7 @@ let headSha = "abc1234";
     if (cmd[0] === "gh" && cmd[1] === "issue" && cmd[2] === "view") out = JSON.stringify(issue([]));
     if (cmd[0] === "gh" && cmd[1] === "api" && String(cmd[2]).includes("/git/ref/heads/")) out = headSha + "\n";
     if (cmd[0] === "gh" && cmd[1] === "pr" && cmd[2] === "diff") out = "src/app/page.tsx\n";
+    if (cmd[0] === "docker" && cmd[1] === "logs") out = containerLog;
     return {
       stdout: new Blob([out]).stream(), stderr: new Blob([""]).stream(), kill() {},
       exited: (async () => { if (opts.stdin instanceof Blob) call.stdin = await opts.stdin.text(); return 0; })(),
@@ -227,4 +229,26 @@ test("Fehlerkommentar enthält keine Server-Dateien und keine Tokens", async () 
     startedAt: "2026-11-11T10:00:00Z", finishedAt: "2026-11-11T10:05:00Z", exitCode: 1 });
   const posted = calls.map((x) => x.stdin).join("\n");
   assert.ok(!posted.includes("GEHEIM"));
+});
+
+// ---------- Veraltete Ausgaben früherer Läufe ----------
+
+test("Ein neuer Lauf entfernt die Ausgaben des vorigen, der Klon bleibt", async () => {
+  const config = cfg();
+  const dir = join(config.dataDir, "jobs", "a__b__7");
+  mkdirSync(join(dir, "repo"), { recursive: true });
+  for (const f of JOB_OUTPUTS) writeFileSync(join(dir, f), "alt");
+  await launch(config, "a/b", issue([]) as any, "build", "retry");
+  for (const f of ["claude.jsonl", "claude.err", "status.json", "setup.log"]) assert.ok(!existsSync(join(dir, f)), `${f} sollte weg sein`);
+  assert.ok(existsSync(join(dir, "repo")));
+});
+
+test("Bricht ein Job vor Claude ab, steht der Grund aus dem Container-Log im Kommentar, nicht ein alter Fehler", async () => {
+  containerLog = "[factory] Klone a/b\nerror: Your local changes to the following files would be overwritten by checkout\n";
+  try {
+    const r = await finishRun("build", {}, 1);
+    assert.equal(r.metric.status, "failed");
+    assert.ok(r.failedComment.includes("would be overwritten by checkout"));
+    assert.ok(!r.failedComment.includes("spend limit"));
+  } finally { containerLog = ""; }
 });
