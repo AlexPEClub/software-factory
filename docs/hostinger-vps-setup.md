@@ -128,6 +128,23 @@ Die Zertifikate holt sich der Webserver Caddy automatisch von Let's Encrypt. Daf
 
 Ohne Domain funktioniert die Vorschau auch, dann aber nur über einfaches HTTP mit der IP-Adresse.
 
+### Weitere Dienste auf demselben Server (optional)
+
+Caddy der Factory (`sf-caddy`) belegt die Ports 80 und 443. Die Datei `/etc/software-factory/Caddyfile` gehört allein der Factory: Sie schreibt sie bei jeder Vorschau-Änderung komplett neu. **Nicht von Hand ändern.** Soll ein anderer Dienst auf diesem Server (z. B. die Staging-Umgebung deiner App) über Caddy erreichbar sein, leg seine Site-Blöcke als eigene Datei ab:
+
+```
+/etc/software-factory/sites.d/<dienst>.caddy      # z. B. meine-app.caddy, Eigentümer root, 644
+```
+
+- Die Factory bindet alle `*.caddy`-Dateien dort per `import` ein und merkt Änderungen innerhalb einer Minute (`pollSeconds`). Änderungen an einer schon eingebundenen Datei sofort übernehmen: `docker exec sf-caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile` (eine ganz neue Datei bindet erst die Factory ein).
+- Vorher prüft sie die gesamte Konfiguration mit `caddy validate`. Ist sie mit den Site-Dateien ungültig, lässt sie sie weg, damit die Vorschauen weiterlaufen, und meldet `caddy:sites-invalid` im Log (`journalctl -u software-factory`).
+- Soll der Dienst **die Vorschau-Domain selbst** auf Port 443 bedienen (z. B. `vorschau.deine-domain.de` als Staging), schalte den Hinweis-Block der Factory ab, sonst wäre die Domain doppelt vergeben: `preview.domainBlock` auf `false` setzen und die Factory neu starten. Die Vorschauen auf den Ports 4001 ff. laufen unverändert weiter.
+
+```bash
+jq '.preview.domainBlock = false' /etc/software-factory/config.json > /tmp/c && mv /tmp/c /etc/software-factory/config.json && chmod 600 /etc/software-factory/config.json
+systemctl restart software-factory
+```
+
 ## 7. Deinen Rechner vorbereiten
 
 Ab hier arbeitest du **auf deinem Rechner**. Die Specs schreibst du lokal mit Claude Code; die Factory bekommt nur das fertige Ergebnis.
@@ -271,6 +288,7 @@ Die Konfiguration liegt in `/etc/software-factory/config.json`. Die wichtigsten 
 | `containerMemory` | `3g` | Arbeitsspeicher pro Agent-Container |
 | `preview.max` | `1` | Gleichzeitige Vorschauen |
 | `preview.domain` | leer | Subdomain für HTTPS-Vorschauen (Schritt 6b) |
+| `preview.domainBlock` | `true` | `false`: Die Factory bedient die Vorschau-Domain auf Port 443 nicht selbst, weil ein anderer Dienst sie über `sites.d` bedient (Schritt 6b) |
 | `allowedUsers` | `[]` | Weitere GitHub-Nutzer, deren Antworten und Änderungswünsche die Factory annimmt. Dein eigener Login zählt immer |
 | `improve.everyDays` | `0` (aus) | Automatischer Verbesserungs-Lauf alle X Tage. Sonst nur mit `factory-improve` |
 

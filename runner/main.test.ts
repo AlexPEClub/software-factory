@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildPrompt, caddyConfig, humanCommentsSinceFactory, lastFactoryMarker, readJobFile, redact,
-  reworksSinceApproval, setFactoryLogin, writeJobFile, type Config,
+  reworksSinceApproval, setFactoryLogin, sitesSignature, writeJobFile, type Config,
 } from "./main.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "sf-test-"));
@@ -106,6 +106,42 @@ test("Caddy: mit Domain HTTPS, ohne Domain nur HTTP", () => {
   const plain = caddyConfig(cfg({ preview: { host: "1.2.3.4", password: "x" } }), [1], "HASH");
   assert.ok(plain.includes("auto_https off"));
   assert.ok(plain.includes(":4001 {"));
+});
+
+test("Caddy: Hinweis-Block für die Domain standardmäßig an, mit domainBlock: false aus", () => {
+  const preview = { host: "1.2.3.4", domain: "vorschau.example.com", password: "x" };
+  assert.ok(caddyConfig(cfg({ preview }), [1], "HASH").includes("vorschau.example.com {"));
+  const off = caddyConfig(cfg({ preview: { ...preview, domainBlock: false } }), [1], "HASH");
+  assert.ok(!off.includes("vorschau.example.com {"));
+  assert.ok(!off.includes("respond"));
+  assert.ok(off.includes("vorschau.example.com:4001 {"), "Vorschau-Ports bleiben");
+});
+
+test("Caddy: Site-Dateien anderer Dienste nur mit sites eingebunden, nach den eigenen Blöcken", () => {
+  const preview = { host: "1.2.3.4", domain: "vorschau.example.com", password: "x" };
+  const without = caddyConfig(cfg({ preview }), [1], "HASH");
+  assert.ok(!without.includes("import"));
+  const withSites = caddyConfig(cfg({ preview }), [1], "HASH", true);
+  const imp = withSites.indexOf("import /etc/caddy/sites.d/*.caddy");
+  assert.ok(imp > withSites.indexOf("vorschau.example.com:4001 {"));
+  assert.ok(withSites.trimEnd().endsWith("import /etc/caddy/sites.d/*.caddy"));
+  // Auch ohne laufende Vorschau: globaler Block + import
+  const empty = caddyConfig(cfg({ preview: { ...preview, domainBlock: false } }), [], "HASH", true);
+  assert.match(empty, /^\{\n  admin localhost:2019\n\}\n\n# .*\nimport \/etc\/caddy\/sites\.d\/\*\.caddy\n$/);
+});
+
+test("sitesSignature: leer ohne Dateien, ändert sich mit Inhalt, ignoriert andere Endungen", () => {
+  const d = tmp();
+  assert.equal(sitesSignature(join(d, "fehlt")), "");
+  assert.equal(sitesSignature(d), "");
+  writeFileSync(join(d, "notiz.txt"), "x");
+  assert.equal(sitesSignature(d), "");
+  writeFileSync(join(d, "app.caddy"), "app.example.com {\n  respond 200\n}\n");
+  const first = sitesSignature(d);
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.equal(sitesSignature(d), first);
+  writeFileSync(join(d, "app.caddy"), "app.example.com {\n  respond 204\n}\n");
+  assert.notEqual(sitesSignature(d), first);
 });
 
 // ---------- factory-verify ----------
