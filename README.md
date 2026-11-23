@@ -17,7 +17,7 @@ Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Se
 
 Bugs gehen auch ohne Spec: Issue mit Label `factory` anlegen und beschreiben, was falsch ist und was du erwartest.
 
-**Status auf dem Board:** Neu → In Prüfung → Rückfrage / Abgelehnt → Freigegeben → In Arbeit (Architektur · Umsetzung · Tests) → Abnahme → Review → Fertig, bei technischen Fehlern Fehlgeschlagen. Prüfung, Entwicklung und Abnahme sind getrennte Läufe in eigenen Containern: Neue Issues werden sofort geprüft, entwickelt wird, sobald ein Platz frei ist.
+**Status auf dem Board:** Neu → In Prüfung → Rückfrage / Abgelehnt → Freigegeben → In Arbeit (Architektur · Umsetzung · Tests) → Abnahme → Review → Fertig, bei technischen Fehlern Fehlgeschlagen, beim Nutzungslimit von Claude Code Pausiert (bis zum Reset startet die Factory für kein Issue einen Lauf, danach setzt sie mit derselben Session und demselben Arbeitsstand fort, höchstens fünfmal je Lauf; die Sperre steht in `/var/lib/software-factory/limit.json`). Prüfung, Entwicklung und Abnahme sind getrennte Läufe in eigenen Containern: Neue Issues werden sofort geprüft, entwickelt wird, sobald ein Platz frei ist.
 
 > 🚧 Erste Version, in aktiver Entwicklung.
 
