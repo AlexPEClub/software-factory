@@ -1,12 +1,8 @@
 # Software Factory
 
-Eine Software Factory mit Claude Code, die rund um die Uhr auf deinem eigenen Server läuft.
+Eine Software Factory mit Claude Code, die rund um die Uhr auf einem eigenen Server läuft.
 
-> 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS. Getestet ist sie auf dem **Hostinger KVM 2** (2 CPU-Kerne, 8 GB RAM) mit der Vorlage „Ubuntu 24.04 mit Claude Code“.
-> Server holen: **[hostinger.com/alexclaude](https://hostinger.com/alexclaude)**. Mit dem Code **`ALEXCLAUDE`** sparst du zusätzlich 10 %.
-> Einrichtung Schritt für Schritt: **[docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md)**
->
-> _Affiliate-Link: Wenn du darüber kaufst, bekomme ich eine Provision. Für dich ändert sich am Preis nichts, mit dem Code wird es günstiger._
+> 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS, bei mir mit einem **Hostinger KVM 4** (4 CPU-Kerne, 16 GB RAM) mit der Vorlage „Ubuntu 26.04 LTS“.
 
 **Du entscheidest, was gebaut wird. Die Factory baut es.**
 
