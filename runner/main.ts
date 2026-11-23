@@ -278,6 +278,8 @@ async function syncBoard(cfg: Config, url: string, status: string, step?: string
 
 const containerName = (repo: string, n: number) => `sf-${repo.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}-${n}`;
 const jobDir = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "jobs", `${repo.replace("/", "__")}__${n}`);
+/** Dateien, die ein Lauf im Job-Ordner hinterlässt und die der Runner auswertet. Der Klon (repo/) bleibt. */
+export const JOB_OUTPUTS = ["status.json", "verify.json", "verify.md", "claude.jsonl", "claude.err", "setup.log"];
 const scenarioDir = (cfg: Config, repo: string, n: number) => join(cfg.dataDir, "scenarios", `${repo.replace("/", "__")}__${n}`);
 const agentLimits = (cfg: Config) => ["--memory", cfg.containerMemory, "--memory-swap", cfg.containerMemory, "--pids-limit", "4096", "--shm-size", "1g"];
 
@@ -348,12 +350,13 @@ async function imageFor(cfg: Config, repo: string): Promise<string> {
   return tag;
 }
 
-async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string) {
+export async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string) {
   const name = containerName(repo, issue.number);
   const dir = jobDir(cfg, repo, issue.number);
   mkdirSync(dir, { recursive: true });
   chownSync(dir, CONTAINER_UID, CONTAINER_UID);
-  for (const f of ["status.json", "verify.json", "verify.md"]) rmSync(join(dir, f), { force: true });
+  // Ausgaben früherer Läufe entfernen: Sonst meldet ein Lauf, der vor Claude abbricht, den alten Fehler erneut
+  for (const f of JOB_OUTPUTS) rmSync(join(dir, f), { force: true });
   writeJobFile(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra));
 
   if (phase === "check" && !issue.comments.some((c) => isFactoryComment(c) && c.body.includes(`${MARK}claimed`))) {
@@ -431,6 +434,8 @@ async function finish(cfg: Config, c: Container, reason?: string) {
     turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null,
   });
   const errTail = redact(readJobFile(join(dir, "claude.err"), 1500) ?? "");
+  // Bricht der Job vor Claude ab (Klonen, Checkout …), steht der Grund nur im Log des Containers
+  const containerLog = redact((await docker(["logs", "--tail", "40", c.name]).catch(() => "")).slice(-1500));
   // Kurze Zusammenfassung des Laufs dauerhaft festhalten: Grundlage für den Verbesserungs-Lauf
   try {
     const runsDir = join(cfg.dataDir, "runs");
@@ -439,7 +444,7 @@ async function finish(cfg: Config, c: Container, reason?: string) {
       repo: c.repo, issue: c.issue, phase: c.phase, mode: c.mode, exitCode: c.exitCode,
       status: metricStatus, problem, reported: status,
       result: typeof result.result === "string" ? redact(result.result.slice(0, 4000)) : null,
-      turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, errTail,
+      turns: result.num_turns ?? null, costUsd: result.total_cost_usd ?? null, errTail, containerLog,
     }, null, 2));
   } catch (e) { log("runs:error", { error: String(e) }); }
   // Dauerhaft festhalten, auch nach dem Aufräumen: Grundlage für factory-stats
@@ -455,6 +460,7 @@ async function finish(cfg: Config, c: Container, reason?: string) {
   } else {
     let detail = typeof result.result === "string" ? result.result.slice(-1500) : "";
     if (!detail) detail = errTail.slice(-800);
+    if (!detail) detail = containerLog.slice(-800);
     detail = redact(detail).replace(/```/g, "'''").trim();
     const issue = JSON.parse(await gh(["issue", "view", String(c.issue), "-R", c.repo, "--json", "number,title,body,url,labels,comments"]));
     await setStage(c.repo, issue, "failed");
