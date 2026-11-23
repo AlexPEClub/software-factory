@@ -5,8 +5,9 @@
 
 import {
   appendFileSync, closeSync, constants, existsSync, fchownSync, fstatSync, mkdirSync, openSync, readFileSync, readSync,
-  rmSync, statSync, writeFileSync, writeSync, chownSync,
+  readdirSync, rmSync, statSync, writeFileSync, writeSync, chownSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 export type Config = {
@@ -31,7 +32,11 @@ export type Config = {
   /** Verbesserungs-Lauf automatisch alle X Tage (zusätzlich zu `factory-improve`). Standard: aus */
   improve?: { everyDays?: number };
   /** Vorschau pro PR mit Passwortschutz (Nutzer "factory"). Mit domain über HTTPS, sonst http://<host>:<4000+slot> */
-  preview?: { host: string; domain?: string; password: string; max?: number; memory?: string };
+  preview?: {
+    host: string; domain?: string; password: string; max?: number; memory?: string;
+    /** false: kein Hinweis-Block für `domain` auf Port 443, weil ein anderer Dienst (sites.d) die Domain bedient. Standard: true */
+    domainBlock?: boolean;
+  };
 };
 
 type Comment = { author: { login: string } | null; body: string; createdAt: string };
@@ -577,6 +582,10 @@ const PREVIEW_PORT = (slot: number) => 4000 + slot; // von außen erreichbar (mi
 const INTERNAL_PORT = (slot: number) => 5000 + slot; // nur lokal, dahinter läuft die App
 let caddyHash: string | null = null;
 let caddyFresh = false; // Caddy einmal pro Runner-Start neu aufsetzen (Konfiguration kann sich geändert haben)
+const CADDYFILE_CHECK = "/etc/software-factory/Caddyfile.check";
+const SITES_DIR = "/etc/software-factory/sites.d"; // Site-Blöcke anderer Dienste auf diesem Server
+const SITES_MOUNT = "/etc/caddy/sites.d";
+let caddySites: string | null = null; // Fingerabdruck der Site-Dateien beim letzten Schreiben
 const previewNoticePosted = new Set<string>();
 
 type Preview = { name: string; repo: string; issue: number; sha: string; slot: number; running: boolean };
@@ -595,26 +604,76 @@ async function listPreviews(): Promise<Preview[]> {
 export const previewLink = (cfg: Config, slot: number) =>
   cfg.preview?.domain ? `https://${cfg.preview.domain}:${PREVIEW_PORT(slot)}` : `http://${cfg.preview?.host}:${PREVIEW_PORT(slot)}`;
 
-export function caddyConfig(cfg: Config, slots: number[], hash: string): string {
+/**
+ * Baut die komplette Caddy-Datei. Die Factory besitzt diese Datei allein und schreibt sie bei jeder Änderung neu.
+ * Andere Dienste auf demselben Server legen eigene Site-Blöcke in SITES_DIR ab (`*.caddy`); mit `sites` werden sie
+ * per `import` eingebunden. `preview.domainBlock: false` lässt den Hinweis-Block für die Domain weg, damit ein
+ * anderer Dienst die Domain auf Port 443 bedienen kann (die Zertifikate für die Vorschau-Ports holt Caddy trotzdem).
+ */
+export function caddyConfig(cfg: Config, slots: number[], hash: string, sites = false): string {
   const domain = cfg.preview?.domain;
   // Mit Domain holt Caddy selbst ein Zertifikat (Ports 80 und 443 müssen erreichbar sein). Ohne Domain nur HTTP.
   const global = domain ? `{\n  admin localhost:2019\n}` : `{\n  auto_https off\n  admin localhost:2019\n}`;
   const blocks = slots.map((slot) =>
     `${domain ? `${domain}:${PREVIEW_PORT(slot)}` : `:${PREVIEW_PORT(slot)}`} {\n  basic_auth {\n    factory ${hash}\n  }\n  reverse_proxy 127.0.0.1:${INTERNAL_PORT(slot)}\n}`);
-  if (domain) blocks.unshift(`${domain} {\n  respond "Software Factory: Vorschauen laufen auf eigenen Ports." 200\n}`);
+  if (domain && cfg.preview?.domainBlock !== false) blocks.unshift(`${domain} {\n  respond "Software Factory: Vorschauen laufen auf eigenen Ports." 200\n}`);
+  if (sites) blocks.push(`# Site-Blöcke anderer Dienste auf diesem Server (${SITES_DIR}/*.caddy)\nimport ${SITES_MOUNT}/*.caddy`);
   return `${global}\n\n${blocks.join("\n\n")}\n`;
+}
+
+/** Fingerabdruck der Site-Dateien anderer Dienste: Ändert er sich, schreibt die Factory ihre Caddy-Datei neu. */
+export function sitesSignature(dir = SITES_DIR): string {
+  let names: string[] = [];
+  try { names = readdirSync(dir).filter((n) => n.endsWith(".caddy")).sort(); } catch { return ""; }
+  const h = createHash("sha256");
+  for (const n of names) {
+    h.update(n + "\0");
+    try { h.update(readFileSync(join(dir, n))); } catch {}
+    h.update("\0");
+  }
+  return names.length ? h.digest("hex") : "";
+}
+
+/** Prüft eine Caddy-Datei samt eingebundener Site-Dateien mit demselben Image, ohne Netz, ohne etwas zu starten. */
+async function caddyValid(text: string): Promise<string | null> {
+  writeFileSync(CADDYFILE_CHECK, text);
+  try {
+    await docker(["run", "--rm", "--network", "none",
+      "-v", `${CADDYFILE_CHECK}:/etc/caddy/Caddyfile:ro`, "-v", `${SITES_DIR}:${SITES_MOUNT}:ro`,
+      "caddy:2-alpine", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"], undefined, 60_000);
+    return null;
+  } catch (e) {
+    return String(e).slice(-800);
+  } finally {
+    rmSync(CADDYFILE_CHECK, { force: true });
+  }
 }
 
 async function writeCaddy(cfg: Config, previews: Preview[]) {
   if (!cfg.preview) return;
   if (!caddyHash) caddyHash = (await docker(["run", "--rm", "caddy:2-alpine", "caddy", "hash-password", "--plaintext", cfg.preview.password])).trim();
-  writeFileSync(CADDYFILE, caddyConfig(cfg, previews.map((p) => p.slot), caddyHash));
+  mkdirSync(SITES_DIR, { recursive: true, mode: 0o755 });
+  const slots = previews.map((p) => p.slot);
+  const signature = sitesSignature();
+  // `import` nur, wenn es Site-Dateien gibt – dann immer vorher geprüft. Fremde Site-Dateien dürfen die
+  // Vorschauen nie lahmlegen: Ist das Ganze ungültig (z. B. dieselbe Domain doppelt), geht es ohne sie weiter.
+  let text = caddyConfig(cfg, slots, caddyHash, Boolean(signature));
+  if (signature) {
+    const problem = await caddyValid(text);
+    if (problem) {
+      log("caddy:sites-invalid", { dir: SITES_DIR, error: problem });
+      text = caddyConfig(cfg, slots, caddyHash, false);
+    }
+  }
+  writeFileSync(CADDYFILE, text);
+  caddySites = signature;
   const running = (await docker(["ps", "--filter", "name=^sf-caddy$", "--format", "{{.Names}}"])).trim();
   if (!running || !caddyFresh) {
     await docker(["rm", "-f", "sf-caddy"]).catch(() => {});
     // Zertifikate liegen im Volume sf-caddy-data und überleben Neustarts
     await docker(["run", "-d", "--name", "sf-caddy", "--network", "host", "--restart", "unless-stopped",
-      "-v", `${CADDYFILE}:/etc/caddy/Caddyfile:ro`, "-v", "sf-caddy-data:/data", "caddy:2-alpine"]);
+      "-v", `${CADDYFILE}:/etc/caddy/Caddyfile:ro`, "-v", `${SITES_DIR}:${SITES_MOUNT}:ro`,
+      "-v", "sf-caddy-data:/data", "caddy:2-alpine"]);
     caddyFresh = true;
   } else {
     await docker(["exec", "sf-caddy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]);
@@ -634,7 +693,8 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
     if (pr) wanted.set(issue.number, { url: pr.url, number: pr.number, sha: pr.headRefOid });
   }
 
-  let changed = !caddyFresh;
+  // Neu schreiben auch, wenn ein anderer Dienst seine Site-Datei geändert hat
+  let changed = !caddyFresh || sitesSignature() !== caddySites;
   // Weg mit Vorschauen ohne offenen PR, mit altem Stand oder abgestürzt
   for (const p of previews) {
     const w = wanted.get(p.issue);
