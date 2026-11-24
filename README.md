@@ -4,16 +4,15 @@ Eine Software Factory mit Claude Code, die rund um die Uhr auf einem eigenen Ser
 
 **Du entscheidest, was gebaut wird. Die Factory baut es.**
 
-1. Du schreibst lokal mit Claude Code die Spec (`/write-spec`), prüfst sie und pushst sie.
-2. Du übergibst sie mit `/to-factory` an die Factory. Das legt ein GitHub Issue mit Label `factory` an, das auf die Spec zeigt.
-3. Ein Agent auf deinem Server prüft die Spec und schreibt Testszenarien. Ein zweiter Agent entwickelt: Architektur, Umsetzung, Tests, Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ein dritter, unabhängiger Agent nimmt das Ergebnis mit den Testszenarien ab, die der Entwickler nie gesehen hat. Ist etwas unklar, fragt die Factory im Issue nach und macht weiter, sobald du antwortest.
-4. Du prüfst den Pull Request und mergst. **Gemergt wird immer von dir.**
+1. Du startest ein Factory-Projekt, frisch oder mit einem bestehenden Repository
+2. Du schreibst lokal mit Claude Code die Spec (`/write-spec`), prüfst sie und pushst sie.
+3. Du übergibst sie mit `/to-factory` an die Factory. Das legt ein GitHub Issue mit Label `factory` an, das auf die Spec zeigt.
+4. Ein Agent auf deinem Server prüft die Spec und schreibt Testszenarien. Ein zweiter Agent entwickelt: Architektur, Umsetzung, Tests, Pull Request mit Belegen (Checks, Screenshots, getroffene Annahmen). Ein dritter, unabhängiger Agent nimmt das Ergebnis mit den Testszenarien ab, die der Entwickler nie gesehen hat. Ist etwas unklar, fragt die Factory im Issue nach und macht weiter, sobald du antwortest.
+5. Du prüfst den Pull Request und mergst. **Gemergt wird immer von dir.**
 
 Bugs gehen auch ohne Spec: Issue mit Label `factory` anlegen und beschreiben, was falsch ist und was du erwartest.
 
 **Status auf dem Board:** Neu → In Prüfung → Rückfrage / Abgelehnt → Freigegeben → In Arbeit (Architektur · Umsetzung · Tests) → Abnahme → Review → Fertig, bei technischen Fehlern Fehlgeschlagen, beim Nutzungslimit von Claude Code Pausiert (bis zum Reset startet die Factory für kein Issue einen Lauf, danach setzt sie mit derselben Session und demselben Arbeitsstand fort, höchstens fünfmal je Lauf; die Sperre steht in `/var/lib/software-factory/limit.json`). Prüfung, Entwicklung und Abnahme sind getrennte Läufe in eigenen Containern: Neue Issues werden sofort geprüft, entwickelt wird, sobald ein Platz frei ist.
-
-> 🚧 Erste Version, in aktiver Entwicklung.
 
 ## So funktioniert es
 
