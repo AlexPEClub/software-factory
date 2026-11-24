@@ -1,0 +1,72 @@
+# Observability-Stack der Factory: Grafana, Loki und Prometheus auf dem Factory-Server.
+# Nicht direkt starten, sondern über ops/observability/obs.sh (setzt die Zugangsdaten aus
+# /etc/software-factory/secrets.env, nur die hier genannten Variablen landen in den Containern).
+#
+# - Alle Ports nur auf 127.0.0.1. Von außen geht es nur über Caddy (sites.d/observability.caddy):
+#   Grafana mit eigenem Login, Log- und Metrik-Empfang mit Basic Auth je Host.
+# - Aufbewahrung: Logs und Metriken 30 Tage.
+# - Speicherlimits zusammen 1,4 GB (Grafana 384 MB, Loki 512 MB, Prometheus 512 MB).
+name: factory-observability
+
+services:
+  grafana:
+    image: grafana/grafana-oss:11.5.2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3300:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD fehlt (obs.sh setzt es)}
+      GF_SERVER_ROOT_URL: https://${OBS_DOMAIN:?OBS_DOMAIN fehlt (observability.domain in config.json)}/
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      GF_LOG_LEVEL: warn
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana-dashboards:ro
+    depends_on:
+      - loki
+      - prometheus
+    mem_limit: 384m
+    memswap_limit: 384m
+
+  loki:
+    image: grafana/loki:3.4.2
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    mem_limit: 512m
+    memswap_limit: 512m
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=10GB
+      # Metriken der Hosts kommen per remote_write von Grafana Alloy
+      - --web.enable-remote-write-receiver
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    mem_limit: 512m
+    memswap_limit: 512m
+
+volumes:
+  grafana-data:
+  loki-data:
+  prometheus-data:

@@ -1,0 +1,205 @@
+// Grafana Alloy auf einem Deploy-Host: schickt Container-Logs, das Journal der factory-*-Units,
+// Host- und Container-Metriken und eine Probe auf /readyz an den Observability-Stack der Factory.
+// Vorlage, auf dem Host z. B. als /etc/alloy/config.alloy. Gegen den Stack getestet ist sie noch nicht
+// (Pilot, Schritt 6 des Plans); Abweichungen bitte hier nachtragen.
+//
+// Labels:
+//   projekt, umgebung  aus dem Compose-Projektnamen <projekt>-<umgebung> (so startet factory-host die Apps),
+//                      für Host-Metriken und die Probe aus HOST_PROJEKT / HOST_UMGEBUNG
+//   dienst             Compose-Dienst (app, db, …) bzw. systemd-Unit (factory-backup, …)
+//
+// Umgebungsvariablen (Secrets aus Infisical, Werte gibt `ops/observability/obs.sh ingest-user NAME` aus):
+//   OBS_LOGS_URL, OBS_METRICS_URL, OBS_USER, OBS_PASSWORD
+// Weitere:
+//   HOST_PROJEKT    Projekt, dem der Host gehört (auf dem Factory-Server: factory)
+//   HOST_UMGEBUNG   staging oder production
+//   READYZ_URL      z. B. http://127.0.0.1:5101/readyz (Port aus .factory/delivery.json)
+
+// ---------- Ziel ----------
+
+loki.write "factory" {
+  endpoint {
+    url = sys.env("OBS_LOGS_URL")
+    basic_auth {
+      username = sys.env("OBS_USER")
+      password = sys.env("OBS_PASSWORD")
+    }
+  }
+}
+
+prometheus.remote_write "factory" {
+  endpoint {
+    url = sys.env("OBS_METRICS_URL")
+    basic_auth {
+      username = sys.env("OBS_USER")
+      password = sys.env("OBS_PASSWORD")
+    }
+  }
+}
+
+// ---------- Container-Logs ----------
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "(.+)-(staging|production)"
+    target_label  = "projekt"
+    replacement   = "$1"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = "(.+)-(staging|production)"
+    target_label  = "umgebung"
+    replacement   = "$2"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "dienst"
+  }
+  // Nur Container von Factory-Projekten
+  rule {
+    source_labels = ["projekt"]
+    regex         = ".+"
+    action        = "keep"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.write.factory.receiver]
+}
+
+// ---------- Journal: Backup, Restore-Test, Heartbeat ----------
+// Ohne projekt/umgebung: Ein Host kann mehrere Apps sichern. Die Zeilen nennen <projekt>-<umgebung>.
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    regex         = "factory-.+\\.service"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    regex         = "(.+)\\.service"
+    target_label  = "dienst"
+  }
+}
+
+loki.source.journal "factory" {
+  relabel_rules = loki.relabel.journal.rules
+  labels        = { host = constants.hostname }
+  forward_to    = [loki.write.factory.receiver]
+}
+
+// ---------- Metriken: Host und Container ----------
+
+prometheus.exporter.unix "host" { }
+
+prometheus.scrape "host" {
+  targets         = prometheus.exporter.unix.host.targets
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.host.receiver]
+}
+
+prometheus.relabel "host" {
+  forward_to = [prometheus.remote_write.factory.receiver]
+
+  rule {
+    target_label = "projekt"
+    replacement  = sys.env("HOST_PROJEKT")
+  }
+  rule {
+    target_label = "umgebung"
+    replacement  = sys.env("HOST_UMGEBUNG")
+  }
+  rule {
+    target_label = "instance"
+    replacement  = constants.hostname
+  }
+}
+
+prometheus.exporter.cadvisor "containers" {
+  docker_only = true
+}
+
+prometheus.scrape "containers" {
+  targets         = prometheus.exporter.cadvisor.containers.targets
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.containers.receiver]
+}
+
+prometheus.relabel "containers" {
+  forward_to = [prometheus.remote_write.factory.receiver]
+
+  rule {
+    source_labels = ["container_label_com_docker_compose_project"]
+    regex         = "(.+)-(staging|production)"
+    target_label  = "projekt"
+    replacement   = "$1"
+  }
+  rule {
+    source_labels = ["container_label_com_docker_compose_project"]
+    regex         = "(.+)-(staging|production)"
+    target_label  = "umgebung"
+    replacement   = "$2"
+  }
+  rule {
+    source_labels = ["container_label_com_docker_compose_service"]
+    target_label  = "dienst"
+  }
+  rule {
+    source_labels = ["projekt"]
+    regex         = ".+"
+    action        = "keep"
+  }
+  // Container-Labels nicht als eigene Serien-Labels speichern
+  rule {
+    regex  = "container_label_.+"
+    action = "labeldrop"
+  }
+}
+
+// ---------- Probe auf /readyz (Dashboard "Bereit") ----------
+
+prometheus.exporter.blackbox "readyz" {
+  config = "{ modules: { http_2xx: { prober: http, timeout: 5s } } }"
+
+  target {
+    name    = "readyz"
+    address = sys.env("READYZ_URL")
+    module  = "http_2xx"
+  }
+}
+
+prometheus.scrape "readyz" {
+  targets         = prometheus.exporter.blackbox.readyz.targets
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.readyz.receiver]
+}
+
+prometheus.relabel "readyz" {
+  forward_to = [prometheus.remote_write.factory.receiver]
+
+  rule {
+    target_label = "projekt"
+    replacement  = sys.env("HOST_PROJEKT")
+  }
+  rule {
+    target_label = "umgebung"
+    replacement  = sys.env("HOST_UMGEBUNG")
+  }
+  rule {
+    target_label = "dienst"
+    replacement  = "readyz"
+  }
+}

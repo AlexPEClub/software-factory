@@ -65,6 +65,8 @@ Danach:
 
 Die ausführliche Schritt-für-Schritt-Anleitung (inkl. Server bei Hostinger): [docs/hostinger-vps-setup.md](docs/hostinger-vps-setup.md).
 
+**Betrieb der Projekte (optional):** `add-repo.sh` legt im Projekt-Repo auch die GitHub-Umgebungen `staging` und `production` und die Labels `incident` und `deploy-failed` an. Mit `observability.domain` in der Config richtet `setup.sh` Grafana, Loki und Prometheus auf dem Server ein ([ops/observability](ops/observability/README.md)). Mit `incidents.enabled` öffnet der Runner für Alarme von healthchecks.io und Grafana je ein Issue mit Label `incident` und schließt es nach der Erholung; diese Issues bearbeitet die Factory nie von selbst. Anleitung: Schritt 6c in der Server-Anleitung.
+
 ## Messen und verbessern
 
 Jeder Lauf wird mit Dauer, Schritten und Ergebnis in `/var/lib/software-factory/metrics.jsonl` festgehalten. Auswertung auf dem Server:

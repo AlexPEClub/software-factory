@@ -73,7 +73,30 @@ export const BOARD: Record<Lang, BoardText> = {
 
 // ---------- Projektsprache: Kommentare in Issues und PRs ----------
 
+/** Ein aktiver Alarm, wie er im Incident-Issue erscheint */
+export type IncidentInfo = {
+  source: "healthchecks" | "grafana";
+  /** Projektname (Label `projekt` bzw. aus dem Check), leer wenn unbekannt */
+  project: string;
+  title: string;
+  details: string[];
+  since?: string;
+  link?: string;
+};
+const SOURCE_NAME: Record<IncidentInfo["source"], string> = { healthchecks: "healthchecks.io", grafana: "Grafana" };
+const incidentBody = (a: IncidentInfo, l: { heading: string; project: string; unknown: string; since: string; open: string; footer: string }) =>
+  `### 🚨 ${l.heading} ${SOURCE_NAME[a.source]}\n\n**${a.title}**\n\n` +
+  `- ${l.project}: ${a.project ? `\`${a.project}\`` : l.unknown}\n` +
+  (a.since ? `- ${l.since}: ${a.since}\n` : "") +
+  a.details.map((d) => `- ${d}\n`).join("") +
+  (a.link ? `\n[${l.open}](${a.link})\n` : "") +
+  `\n_${l.footer}_`;
+
 type ProjectText = {
+  incidentTitle: (a: IncidentInfo) => string;
+  incidentBody: (a: IncidentInfo) => string;
+  incidentResolved: (source: IncidentInfo["source"]) => string;
+  incidentDuplicate: (keep: number) => string;
   claimed: string;
   paused: (when: string, n: number, max: number) => string;
   failed: (problem: string, detail: string) => string;
@@ -91,7 +114,16 @@ type ProjectText = {
 
 export const TEXT: Record<Lang, ProjectText> = {
   de: {
-    claimed: "🏭 Die Factory hat das Issue übernommen und prüft es jetzt. Den Fortschritt siehst du am Status (Label bzw. Board).",
+    incidentTitle: (a) => `Incident: ${a.title}`,
+    incidentBody: (a) => incidentBody(a, {
+      heading: "Alarm von", project: "Projekt", unknown: "nicht zugeordnet (incidents.projects in der Factory-Config)",
+      since: "Seit", open: "In der Quelle ansehen",
+      footer: "Dieses Issue hat der Runner der Factory angelegt. Er kommentiert und schließt es, sobald der Alarm vorbei ist. " +
+        "Die Factory bearbeitet Incidents nie von selbst: Soll sie sich darum kümmern, leg ein eigenes Issue mit Label `factory` an und verweise auf dieses.",
+    }),
+    incidentResolved: (source) => `### ✅ Alarm vorbei\n\n${SOURCE_NAME[source]} meldet den Alarm nicht mehr. Die Factory schließt das Issue.`,
+    incidentDuplicate: (keep) => `Doppelt zu #${keep}. Die Factory schließt dieses Issue, der Alarm wird dort verfolgt.`,
+    claimed:"🏭 Die Factory hat das Issue übernommen und prüft es jetzt. Den Fortschritt siehst du am Status (Label bzw. Board).",
     paused: (when, n, max) =>
       `### ⏸️ Nutzungslimit erreicht\n\nDer Lauf wurde vom Nutzungslimit von Claude Code unterbrochen. Die Factory setzt ihn **ab ${when}** automatisch fort, ` +
       `mit derselben Claude-Session und dem bisherigen Arbeitsstand (Fortsetzung ${n} von ${max}).\n\n` +
@@ -114,7 +146,16 @@ export const TEXT: Record<Lang, ProjectText> = {
     timeout: (minutes) => `Zeitlimit von ${minutes} Minuten überschritten.`,
   },
   en: {
-    claimed: "🏭 The factory has picked up this issue and is checking it now. You can follow the progress via the status (label or board).",
+    incidentTitle: (a) => `Incident: ${a.title}`,
+    incidentBody: (a) => incidentBody(a, {
+      heading: "Alert from", project: "Project", unknown: "not mapped (incidents.projects in the factory config)",
+      since: "Since", open: "View in source",
+      footer: "The factory runner opened this issue. It comments and closes it as soon as the alert is over. " +
+        "The factory never works on incidents by itself: if it should take care of this, open a separate issue with the label `factory` that refers to this one.",
+    }),
+    incidentResolved: (source) => `### ✅ Alert over\n\n${SOURCE_NAME[source]} no longer reports the alert. The factory closes this issue.`,
+    incidentDuplicate: (keep) => `Duplicate of #${keep}. The factory closes this issue, the alert is tracked there.`,
+    claimed:"🏭 The factory has picked up this issue and is checking it now. You can follow the progress via the status (label or board).",
     paused: (when, n, max) =>
       `### ⏸️ Usage limit reached\n\nThe run was interrupted by the Claude Code usage limit. The factory resumes it automatically **from ${when}**, ` +
       `with the same Claude session and the current working state (resume ${n} of ${max}).\n\n` +

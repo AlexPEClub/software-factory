@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { BOARD, DEFAULT_LANGUAGE, TEXT, languageName, normalizeLanguage, textLang } from "./strings.ts";
+import { BOARD, DEFAULT_LANGUAGE, TEXT, languageName, normalizeLanguage, textLang, type IncidentInfo } from "./strings.ts";
 
 export type Config = {
   repos: string[];
@@ -41,6 +41,23 @@ export type Config = {
     /** false: kein Hinweis-Block für `domain` auf Port 443, weil ein anderer Dienst (sites.d) die Domain bedient. Standard: true */
     domainBlock?: boolean;
   };
+  /** Ping an healthchecks.io nach jedem Durchlauf (Watchdog für den Factory-Server selbst). Leer: aus */
+  heartbeatUrl?: string;
+  /**
+   * Incident-Intake: aktive Alarme von healthchecks.io und Grafana als Issues mit Label "incident" im Projekt-Repo.
+   * Schlüssel aus der Umgebung (secrets.env): HEALTHCHECKS_API_KEY (nur lesend), GRAFANA_TOKEN. Ohne Schlüssel bleibt die Quelle aus.
+   */
+  incidents?: {
+    enabled?: boolean;
+    /** Projektname → Repo. Projektname = Label `projekt` eines Grafana-Alarms bzw. Tag oder Namensanfang eines Checks */
+    projects?: Record<string, string>;
+    /** Repo für Alarme ohne zugeordnetes Projekt (z. B. das Factory-Repo). Leer: nur im Log */
+    fallbackRepo?: string;
+    healthchecks?: { apiUrl?: string };
+    grafana?: { url?: string };
+  };
+  /** Observability-Stack auf diesem Server (ops/observability/obs.sh). Der Runner selbst liest nur incidents. */
+  observability?: { domain?: string };
 };
 
 type Comment = { author: { login: string } | null; body: string; createdAt: string };
@@ -834,6 +851,215 @@ async function maybeImprove(cfg: Config, freeSlots: number) {
   log("improve:started", { repo: cfg.factoryRepo });
 }
 
+// ---------- Incident-Intake und Heartbeat ----------
+// Bei jedem Durchlauf: aktive Alarme von healthchecks.io (Checks mit Status "down") und Grafana (Alertmanager-API)
+// holen und je Alarm genau ein offenes Issue mit Label "incident" im Repo des Projekts halten. Ist der Alarm vorbei,
+// kommentiert und schließt der Runner das Issue. Diese Issues bekommen nie das Label "factory".
+// Nur lesend: kein Webhook, kein GitHub-Token bei einem Dritten.
+
+/** Labels, mit denen ein Issue nie als Aufgabe der Factory gilt */
+export const NEVER_FACTORY = ["incident", "deploy-failed"];
+export const isFactoryWork = (issue: { labels: { name: string }[] }) => !issue.labels.some((l) => NEVER_FACTORY.includes(l.name));
+
+export type IncidentSource = IncidentInfo["source"];
+export type Alert = IncidentInfo & { key: string };
+type IncidentIssue = { number: number; body: string; author: { login: string } | null; createdAt: string };
+
+const INCIDENT_LABEL = "incident";
+const INCIDENT_MARK = /<!-- software-factory:incident:([A-Za-z0-9_-]+) -->/;
+const KEY_PREFIX: Record<IncidentSource, string> = { healthchecks: "hc-", grafana: "gf-" };
+const sourceOfKey = (key: string) => (Object.keys(KEY_PREFIX) as IncidentSource[]).find((s) => key.startsWith(KEY_PREFIX[s]));
+const safeKey = (s: unknown) => String(s ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+const incidentLabelReady = new Set<string>();
+const unmappedLogged = new Set<string>();
+
+async function getJson(url: string, headers: Record<string, string>): Promise<any> {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+/** Projekt eines Checks: Tag mit dem Projektnamen, sonst Slug bzw. Name = Projekt oder beginnt mit "<projekt>-" (längster Treffer). */
+export function projectForCheck(check: { tags?: string; slug?: string; name?: string }, projects: Record<string, string> = {}): string {
+  const names = Object.keys(projects);
+  const tag = (check.tags ?? "").split(/\s+/).find((t) => names.includes(t));
+  if (tag) return tag;
+  const candidates = [check.slug, check.name].filter(Boolean).map((s) => String(s).toLowerCase());
+  return names.filter((p) => candidates.some((c) => c === p.toLowerCase() || c.startsWith(`${p.toLowerCase()}-`)))
+    .sort((a, b) => b.length - a.length)[0] ?? "";
+}
+
+/** Checks von healthchecks.io mit Status "down". null: Quelle aus oder nicht erreichbar (dann schließt der Runner nichts). */
+export async function fetchHealthchecks(cfg: Config): Promise<Alert[] | null> {
+  const key = process.env.HEALTHCHECKS_API_KEY;
+  if (!key) return null;
+  const base = cfg.incidents?.healthchecks?.apiUrl || "https://healthchecks.io/api/v3/";
+  try {
+    const data = await getJson(new URL("checks/", base.endsWith("/") ? base : `${base}/`).toString(), { "X-Api-Key": key });
+    if (!Array.isArray(data?.checks)) throw new Error("Antwort ohne checks");
+    return data.checks.filter((c: any) => c?.status === "down").map((c: any): Alert => {
+      // Nur-lesende Schlüssel liefern unique_key statt der Ping-URL
+      const id = safeKey(c.unique_key ?? String(c.ping_url ?? "").split("/").pop() ?? c.slug);
+      return {
+        key: `${KEY_PREFIX.healthchecks}${id || safeKey(c.name)}`, source: "healthchecks",
+        project: projectForCheck(c, cfg.incidents?.projects), title: String(c.name || c.slug || id),
+        since: c.next_ping ?? undefined,
+        details: [
+          `Check: \`${c.slug || c.name}\``,
+          ...(c.tags ? [`Tags: \`${c.tags}\``] : []),
+          `last_ping: ${c.last_ping ?? "–"}`,
+          ...(c.grace ? [`grace: ${c.grace} s`] : []),
+        ],
+      };
+    });
+  } catch (e) {
+    log("incident:source-error", { source: "healthchecks", error: String(e) });
+    return null;
+  }
+}
+
+/** Aktive Alarme aus Grafana (eingebauter Alertmanager). null: Quelle aus oder nicht erreichbar. */
+export async function fetchGrafanaAlerts(cfg: Config): Promise<Alert[] | null> {
+  const token = process.env.GRAFANA_TOKEN;
+  if (!token) return null;
+  const base = (cfg.incidents?.grafana?.url || "http://127.0.0.1:3300").replace(/\/+$/, "");
+  try {
+    const data = await getJson(`${base}/api/alertmanager/grafana/api/v2/alerts?active=true&silenced=false&inhibited=false`,
+      { Authorization: `Bearer ${token}` });
+    if (!Array.isArray(data)) throw new Error("Antwort ist keine Liste");
+    return data.filter((a: any) => (a?.status?.state ?? "active") === "active" && safeKey(a?.fingerprint)).map((a: any): Alert => {
+      const labels: Record<string, string> = a.labels ?? {};
+      const notes: Record<string, string> = a.annotations ?? {};
+      const where = [labels.umgebung, labels.instance].filter(Boolean).join(", ");
+      return {
+        key: `${KEY_PREFIX.grafana}${safeKey(a.fingerprint)}`, source: "grafana",
+        project: labels.projekt ?? "", title: `${labels.alertname ?? "Alarm"}${where ? ` (${where})` : ""}`,
+        since: a.startsAt, link: a.generatorURL || undefined,
+        details: [
+          ...(notes.summary ? [notes.summary] : []),
+          ...(notes.description ? [notes.description] : []),
+          `Labels: ${Object.entries(labels).filter(([k]) => !k.startsWith("__")).map(([k, v]) => `\`${k}=${v}\``).join(" ")}`,
+        ],
+      };
+    });
+  } catch (e) {
+    log("incident:source-error", { source: "grafana", error: String(e) });
+    return null;
+  }
+}
+
+/** Repo eines Projekts laut Config, sonst das Auffang-Repo. Leer: keins. */
+export const incidentRepo = (cfg: Config, project: string) =>
+  (project && cfg.incidents?.projects?.[project]) || cfg.incidents?.fallbackRepo || "";
+
+/** Issues, die der Runner für einen Alarm angelegt hat und die er noch einmal anlegen würde: Schlüssel → Repo und Nummer. */
+type IncidentState = Record<string, { repo: string; issue: number }>;
+const incidentStateFile = (cfg: Config) => join(cfg.dataDir, "incidents.json");
+function getIncidentState(cfg: Config): IncidentState {
+  try { return JSON.parse(readFileSync(incidentStateFile(cfg), "utf8")); } catch { return {}; }
+}
+
+async function ensureIncidentLabel(repo: string) {
+  if (incidentLabelReady.has(repo)) return;
+  await gh(["label", "create", INCIDENT_LABEL, "-R", repo, "--color", "B60205", "--description", "Alarm aus Monitoring oder Watchdog", "--force"]);
+  incidentLabelReady.add(repo);
+}
+
+/**
+ * Gleicht Alarme und offene Incident-Issues ab. `results`: je Quelle die aktiven Alarme, null wenn die Quelle aus
+ * oder nicht erreichbar war. Issues einer solchen Quelle bleiben unverändert, damit ein Ausfall der API nichts schließt.
+ * Schließt ein Mensch das Issue, solange der Alarm noch aktiv ist, legt der Runner kein neues an (erst beim nächsten Alarm).
+ */
+export async function syncIncidents(cfg: Config, results: { source: IncidentSource; alerts: Alert[] | null }[]) {
+  const reachable = new Set(results.filter((r) => r.alerts !== null).map((r) => r.source));
+  const active = new Map<string, Alert>();
+  for (const r of results) for (const a of r.alerts ?? []) active.set(a.key, a);
+  const state = getIncidentState(cfg);
+  const repos = new Set([...Object.values(cfg.incidents?.projects ?? {}), cfg.incidents?.fallbackRepo ?? ""].filter(Boolean));
+
+  for (const a of active.values()) {
+    const repo = incidentRepo(cfg, a.project);
+    if (repo) { repos.add(repo); continue; }
+    if (!unmappedLogged.has(a.key)) log("incident:unmapped", { key: a.key, source: a.source, project: a.project, title: a.title });
+    unmappedLogged.add(a.key);
+  }
+
+  for (const repo of repos) {
+    try {
+      const open: IncidentIssue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", INCIDENT_LABEL, "--state", "open",
+        "--json", "number,body,author,createdAt", "--limit", "100"]));
+      // Nur Issues, die der Runner selbst angelegt hat (wie bei den Markern in Kommentaren)
+      const byKey = new Map<string, IncidentIssue[]>();
+      for (const i of open.filter((i) => !!FACTORY_LOGIN && i.author?.login === FACTORY_LOGIN)) {
+        const key = (i.body ?? "").match(INCIDENT_MARK)?.[1];
+        if (key) byKey.set(key, [...(byKey.get(key) ?? []), i].sort((x, y) => x.number - y.number));
+      }
+      const t = texts(await projectLanguage(repo));
+
+      for (const a of [...active.values()].filter((a) => incidentRepo(cfg, a.project) === repo)) {
+        const [keep, ...duplicates] = byKey.get(a.key) ?? [];
+        if (keep) {
+          for (const d of duplicates) {
+            await gh(["issue", "comment", String(d.number), "-R", repo, "--body-file", "-"], `${MARK}incident:duplicate -->\n${t.incidentDuplicate(keep.number)}`);
+            await gh(["issue", "close", String(d.number), "-R", repo, "--reason", "not planned"]);
+            log("incident:duplicate-closed", { repo, issue: d.number, keep: keep.number, key: a.key });
+          }
+          state[a.key] = { repo, issue: keep.number };
+          continue;
+        }
+        if (state[a.key]?.repo === repo) continue; // von Hand geschlossen, Alarm läuft noch
+        await ensureIncidentLabel(repo);
+        // Bewusst nur "incident", nie das Label der Factory
+        const url = (await gh(["issue", "create", "-R", repo, "--title", t.incidentTitle(a), "--label", INCIDENT_LABEL, "--body-file", "-"],
+          `<!-- software-factory:incident:${a.key} -->\n${redact(t.incidentBody(a))}`)).trim();
+        const issue = Number(url.match(/\/issues\/(\d+)/)?.[1] ?? 0);
+        state[a.key] = { repo, issue };
+        log("incident:opened", { repo, issue, key: a.key, source: a.source, title: a.title });
+      }
+
+      // Erholt: offene Issues ohne aktiven Alarm schließen, aber nur wenn ihre Quelle erreichbar war
+      for (const [key, issues] of byKey) {
+        const source = sourceOfKey(key);
+        if (active.has(key) || !source || !reachable.has(source)) continue;
+        for (const i of issues) {
+          await gh(["issue", "comment", String(i.number), "-R", repo, "--body-file", "-"], `${MARK}incident:resolved -->\n${t.incidentResolved(source)}`);
+          await gh(["issue", "close", String(i.number), "-R", repo, "--reason", "completed"]);
+          log("incident:resolved", { repo, issue: i.number, key });
+        }
+        delete state[key];
+      }
+    } catch (e) {
+      log("incident:repo-error", { repo, error: String(e) });
+    }
+  }
+
+  // Vorbei, während das Issue schon (von Hand) geschlossen war: beim nächsten Alarm wieder ein neues Issue
+  for (const key of Object.keys(state)) {
+    const source = sourceOfKey(key);
+    if (!active.has(key) && source && reachable.has(source)) delete state[key];
+  }
+  for (const key of unmappedLogged) if (!active.has(key)) unmappedLogged.delete(key);
+  mkdirSync(cfg.dataDir, { recursive: true });
+  writeFileSync(incidentStateFile(cfg), JSON.stringify(state));
+}
+
+export async function incidentIntake(cfg: Config) {
+  if (!cfg.incidents?.enabled) return;
+  const [hc, gf] = await Promise.all([fetchHealthchecks(cfg), fetchGrafanaAlerts(cfg)]);
+  await syncIncidents(cfg, [{ source: "healthchecks", alerts: hc }, { source: "grafana", alerts: gf }]);
+}
+
+/** Lebenszeichen an healthchecks.io: Bleibt es aus, meldet healthchecks.io den Ausfall per E-Mail. */
+export async function heartbeat(cfg: Config) {
+  if (!cfg.heartbeatUrl) return;
+  try {
+    const res = await fetch(cfg.heartbeatUrl, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    log("heartbeat:error", { error: String(e) });
+  }
+}
+
 // ---------- Hauptschleife ----------
 
 /** Ein Lauf ging verloren (z. B. Server-Neustart): einmal automatisch neu starten, danach entscheidet der Mensch. */
@@ -848,8 +1074,10 @@ async function lostJob(cfg: Config, repo: string, issue: Issue): Promise<boolean
 }
 
 async function tickRepo(cfg: Config, repo: string, containers: Container[], slots: { free: number }) {
-  const issues: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
+  const listed: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
     "--json", "number,title,body,url,labels,comments", "--limit", "100"]));
+  // Alarme und Deploy-Fehler sind nie Aufgaben der Factory, auch wenn jemand das Label setzt
+  const issues = listed.filter(isFactoryWork);
   issues.sort((a, b) => a.number - b.number); // älteste zuerst
   const openNumbers = new Set(issues.map((i) => i.number));
 
@@ -977,6 +1205,10 @@ async function tick(cfg: Config) {
   }
 
   await maybeImprove(cfg, slots.free).catch((e) => log("improve:error", { error: String(e) }));
+
+  // Erst das Lebenszeichen, dann die Alarme: Nach einem Neustart steht der eigene Check sonst noch auf "down"
+  await heartbeat(cfg);
+  await incidentIntake(cfg).catch((e) => log("incident:error", { error: String(e) }));
 }
 
 async function main() {
@@ -996,6 +1228,10 @@ async function main() {
     login: FACTORY_LOGIN, allowedUsers: cfg.allowedUsers ?? [],
     preview: cfg.preview ? previewLink(cfg, 1).replace(/:4001$/, ":4001…") : "aus",
     containerUid: CONTAINER_UID, repos: cfg.repos, maxParallel: cfg.maxParallel, model: cfg.model, workflow: cfg.workflow,
+    heartbeat: cfg.heartbeatUrl ? "an" : "aus",
+    incidents: cfg.incidents?.enabled
+      ? { healthchecks: !!process.env.HEALTHCHECKS_API_KEY, grafana: !!process.env.GRAFANA_TOKEN, projects: Object.keys(cfg.incidents.projects ?? {}) }
+      : "aus",
   });
   while (true) {
     try {

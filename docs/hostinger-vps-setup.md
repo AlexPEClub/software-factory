@@ -145,6 +145,82 @@ jq '.preview.domainBlock = false' /etc/software-factory/config.json > /tmp/c && 
 systemctl restart software-factory
 ```
 
+## 6c. Monitoring und Alarme (optional)
+
+Für Projekte, die die Factory bis in staging und production bringt (Betriebskonventionen, `docs/proposals/betriebskonventionen.md`), gibt es drei Bausteine. Du kannst sie einzeln einschalten:
+
+- **Observability-Stack:** Grafana, Loki und Prometheus auf diesem Server. Alle Hosts schicken ihre Logs und Metriken hierher, je Projekt gibt es ein fertiges Dashboard. Technische Details: [`ops/observability/README.md`](../ops/observability/README.md).
+- **Incident-Intake:** Der Runner fragt bei jedem Durchlauf healthchecks.io und Grafana nach aktiven Alarmen und öffnet je Alarm genau ein Issue mit Label `incident` im Repo des Projekts. Ist der Alarm vorbei, kommentiert und schließt er es.
+- **Heartbeat der Factory:** Der Runner meldet sich nach jedem Durchlauf bei healthchecks.io. Fällt der Server aus, schreibt dir healthchecks.io eine E-Mail. Ein Issue kann ein ausgefallener Server nicht mehr anlegen.
+
+> **Arbeitsspeicher:** Der Stack braucht bis zu 1,4 GB. Auf dem KVM 2 (8 GB) reicht das neben zwei Agent-Läufen (je 3 GB) und einer Vorschau nicht. Setz dann `maxParallel` auf `1` oder nimm einen größeren Server (KVM 4).
+
+### Observability-Stack
+
+Voraussetzung ist die Vorschau mit HTTPS (Schritt 6b): Der Stack läuft hinter dem Caddy der Factory, und der holt Zertifikate nur, wenn `preview.domain` gesetzt ist.
+
+1. Leg einen weiteren **A-Eintrag** an, z. B. `grafana.deine-domain.de` → IP deines Servers.
+2. Domain eintragen und den Stack einrichten:
+
+   ```bash
+   jq '.observability.domain = "grafana.deine-domain.de"' /etc/software-factory/config.json > /tmp/c && mv /tmp/c /etc/software-factory/config.json && chmod 600 /etc/software-factory/config.json
+   cd /opt/software-factory && ./setup.sh
+   ```
+
+   `setup.sh` startet den Stack, sobald `observability.domain` gesetzt ist (sonst überspringt es ihn). Später genügt `factory-obs install`. Dabei entstehen das Admin-Passwort für Grafana und ein Lese-Token für den Runner, beide in `/etc/software-factory/secrets.env`.
+3. Nach etwa einer Minute ist Grafana unter `https://grafana.deine-domain.de` erreichbar. Login `admin`, das Passwort zeigt:
+
+   ```bash
+   grep ^GRAFANA_ADMIN_PASSWORD= /etc/software-factory/secrets.env | cut -d= -f2
+   ```
+
+4. Für jeden Host, der Logs und Metriken schicken soll (je Projekt und Umgebung), einen Zugang anlegen:
+
+   ```bash
+   factory-obs ingest-user meine-app-staging
+   ```
+
+   Die vier ausgegebenen Werte (`OBS_LOGS_URL`, `OBS_METRICS_URL`, `OBS_USER`, `OBS_PASSWORD`) trägst du als Secrets der Umgebung in Infisical ein. Das Passwort wird nur dieses eine Mal angezeigt. Auf dem Host sammelt Grafana Alloy die Daten, die Vorlage dafür ist `ops/observability/alloy/host.alloy`.
+
+Das Dashboard findest du in Grafana unter **Dashboards → Factory → Projekt**. Logs und Metriken bleiben 30 Tage. Weitere Befehle: `factory-obs compose ps`, `factory-obs compose logs loki`, `factory-obs ingest-remove NAME`.
+
+### Alarme als Issues
+
+1. **healthchecks.io:** Leg ein Konto an (Free-Tarif „Hobbyist“: 20 Checks). Die Checks der Projekte heißen `<projekt>-<umgebung>` für den Heartbeat, `<projekt>-<umgebung>-backup` und `<projekt>-<umgebung>-restore-test`, alternativ trägt ein Check den Projektnamen als Tag. Daran erkennt der Runner das Projekt.
+2. Unter **Settings → API Access** einen **nur lesenden** API-Schlüssel erzeugen und auf dem Server speichern (der Schlüssel landet nicht im Verlauf):
+
+   ```bash
+   stty -echo; printf "API-Schlüssel einfügen, dann Enter und Strg+D: "; K=$(cat | tr -d '[:space:]'); stty echo; echo; grep -v '^HEALTHCHECKS_API_KEY=' /etc/software-factory/secrets.env > /tmp/s; printf 'HEALTHCHECKS_API_KEY=%s\n' "$K" >> /tmp/s; install -m 600 /tmp/s /etc/software-factory/secrets.env; rm /tmp/s; unset K; echo gespeichert
+   ```
+
+3. Projekte den Repos zuordnen und den Intake einschalten. Der Projektname ist derselbe wie `project` in der `.factory/delivery.json` des Projekts:
+
+   ```bash
+   jq '.incidents.enabled = true | .incidents.projects = {"meine-app": "dein-name/meine-app"} | .incidents.fallbackRepo = "dein-name/software-factory"' /etc/software-factory/config.json > /tmp/c && mv /tmp/c /etc/software-factory/config.json && chmod 600 /etc/software-factory/config.json
+   systemctl restart software-factory
+   ```
+
+   `fallbackRepo` (optional) bekommt Alarme, die keinem Projekt zugeordnet sind, z. B. die des Factory-Servers selbst (Projekt `factory`). Ohne `fallbackRepo` stehen sie nur im Log (`incident:unmapped`).
+
+Was der Runner tut:
+
+- Je Alarm genau ein offenes Issue mit Label `incident`. Hält der Alarm an, kommt kein zweites dazu. Ein Check zählt als Alarm, sobald healthchecks.io ihn auf **down** setzt (nach Ablauf der Karenzzeit).
+- Ist der Alarm vorbei, kommentiert er das Issue und schließt es. Ist healthchecks.io oder Grafana gerade nicht erreichbar, schließt er nichts.
+- Schließt du ein Issue, solange der Alarm noch läuft, öffnet er kein neues. Erst ein neuer Alarm nach der Erholung bekommt wieder ein Issue.
+- Issues mit `incident` oder `deploy-failed` (die öffnet die Pipeline bei einem fehlgeschlagenen Deploy) bearbeitet die Factory **nie**, auch nicht, wenn jemand das Label `factory` dazusetzt. Soll sie sich um einen Incident kümmern, leg ein eigenes Issue mit Label `factory` an und verweis darauf.
+
+### Heartbeat der Factory
+
+1. In healthchecks.io einen Check `factory-runner` anlegen: Zeitraum 1 Minute (wie `pollSeconds`), Karenzzeit 10 Minuten, Benachrichtigung per E-Mail.
+2. Seine Ping-URL eintragen:
+
+   ```bash
+   jq '.heartbeatUrl = "https://hc-ping.com/DEINE-UUID"' /etc/software-factory/config.json > /tmp/c && mv /tmp/c /etc/software-factory/config.json && chmod 600 /etc/software-factory/config.json
+   systemctl restart software-factory
+   ```
+
+Der Runner pingt nach jedem Durchlauf, auch wenn einzelne Repos Fehler melden. Bleibt der Ping aus, läuft der Runner nicht mehr oder Docker hängt.
+
 ## 7. Deinen Rechner vorbereiten
 
 Ab hier arbeitest du **auf deinem Rechner**. Die Specs schreibst du lokal mit Claude Code; die Factory bekommt nur das fertige Ergebnis.
@@ -167,7 +243,7 @@ Die Skills sind Verknüpfungen auf diesen Ordner. Updates holst du dir mit `git 
 
 ## 8. Ein Projekt anbinden
 
-Die Factory arbeitet nur in Repos, die du ihr ausdrücklich gibst. Dabei legt sie die Status-Labels im Repo an, trägt es in ihre Konfiguration ein und erstellt beim ersten Mal das Kanban-Board „Software Factory“ in deinem GitHub-Account.
+Die Factory arbeitet nur in Repos, die du ihr ausdrücklich gibst. Dabei legt sie die Status-Labels und die Labels `incident` und `deploy-failed` im Repo an, dazu die GitHub-Umgebungen `staging` und `production` für Deploys (nur Branch `main`, production zusätzlich mit deiner Freigabe), trägt es in ihre Konfiguration ein und erstellt beim ersten Mal das Kanban-Board „Software Factory“ in deinem GitHub-Account.
 
 ### Neues Projekt (empfohlen)
 
@@ -292,6 +368,11 @@ Die Konfiguration liegt in `/etc/software-factory/config.json`. Die wichtigsten 
 | `preview.domainBlock` | `true` | `false`: Die Factory bedient die Vorschau-Domain auf Port 443 nicht selbst, weil ein anderer Dienst sie über `sites.d` bedient (Schritt 6b) |
 | `allowedUsers` | `[]` | Weitere GitHub-Nutzer, deren Antworten und Änderungswünsche die Factory annimmt. Dein eigener Login zählt immer |
 | `improve.everyDays` | `0` (aus) | Automatischer Verbesserungs-Lauf alle X Tage. Sonst nur mit `factory-improve` |
+| `heartbeatUrl` | leer (aus) | Ping-URL eines healthchecks.io-Checks, der Runner meldet sich nach jedem Durchlauf (Schritt 6c) |
+| `observability.domain` | leer (aus) | Domain für Grafana und den Log- und Metrik-Empfang; gesetzt richtet `setup.sh` den Observability-Stack ein (Schritt 6c) |
+| `incidents.enabled` | `false` | Alarme von healthchecks.io und Grafana als Issues mit Label `incident` (Schritt 6c) |
+| `incidents.projects` | – | Projektname → Repo, z. B. `{"meine-app": "dein-name/meine-app"}` |
+| `incidents.fallbackRepo` | leer | Repo für Alarme ohne zugeordnetes Projekt |
 
 Nach Änderungen: `systemctl restart software-factory`.
 
@@ -312,6 +393,8 @@ Der Standard `maxParallel: 2` passt zum KVM 2: zwei Läufe mit je bis zu 3 GB pl
 - **SSH-Key statt Passwort:** Hinterlege im hPanel deinen SSH-Key und schalte danach die Passwort-Anmeldung ab.
 - **Zugangsdaten:** Token und Vorschau-Passwort liegen nur in `/etc/software-factory/` (nur für root lesbar). Teil diese Dateien nie und häng sie nie an ein Issue.
 - **Wer darf mitreden:** Die Factory nimmt Antworten und Änderungswünsche nur von dir an (und von Personen unter `allowedUsers`). Kommentare anderer ignoriert sie und zeigt sie dem Agent nicht. Aufgaben einstellen kann jeder, der im Repo Labels setzen darf. Bind trotzdem zuerst private Repos an.
+- **Freigabe für production:** `add-repo.sh` trägt den Besitzer des Repos als Pflicht-Prüfer der Umgebung `production` ein. Läuft die Factory auf dem Server unter deinem eigenen GitHub-Login, könnte ein Agent mit diesem Token Deploys theoretisch selbst freigeben. Sicherer ist ein eigener GitHub-Account für die Factory (dann `allowedUsers` mit deinem Login). In privaten Repos ohne GitHub Pro/Team legt `add-repo.sh` production ohne Pflicht-Freigabe an und sagt das; starte production-Deploys dann nur von Hand.
+- **Observability:** Grafana hat einen eigenen Login, Logs und Metriken nimmt der Server nur mit dem Zugang je Host an (`factory-obs ingest-user`). Die Zugänge liegen wie alles andere unter `/etc/software-factory/`.
 
 ## 14. Wenn etwas hakt
 
@@ -325,6 +408,9 @@ Der Standard `maxParallel: 2` passt zum KVM 2: zwei Läufe mit je bis zu 3 GB pl
 | Vorschau lädt nicht | Nach jedem neuen Stand braucht sie 1–2 Minuten. Ist schon eine Vorschau aktiv (`preview.max`), bekommt der PR keine weitere. Mit Domain: Zeigt die Subdomain auf den Server und sind Port 80 und 443 offen? |
 | Claude-Limit erreicht | Das Issue steht auf **Pausiert**, die Factory macht nach dem Reset von selbst weiter. Früher fortsetzen: `/var/lib/software-factory/limit.json` löschen und im Issue kommentieren. Passiert es oft: `maxParallel` senken oder auf API-Key umsteigen |
 | Neue Version der Factory holen | `factory-rollout` |
+| Grafana nicht erreichbar | Zeigt die Domain auf den Server, ist `preview.domain` gesetzt (Schritt 6b)? `factory-obs compose ps` zeigt, ob der Stack läuft. `caddy:sites-invalid` im Log: `factory-obs site` schreibt die Caddy-Site neu |
+| Kein Issue bei einem Alarm | `journalctl -u software-factory | grep incident`: `incident:unmapped` = Projekt fehlt in `incidents.projects`, `incident:source-error` = Schlüssel falsch oder Dienst nicht erreichbar. Nach Änderungen an `secrets.env` den Runner neu starten |
+| Incident-Issue wurde nicht neu geöffnet | Absicht: Hast du es geschlossen, solange der Alarm lief, öffnet erst der nächste Alarm wieder eins |
 
 ## Was die Factory nie tut
 

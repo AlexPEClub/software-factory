@@ -72,6 +72,16 @@ chmod +x /usr/local/bin/factory-improve
 printf '#!/bin/sh\n# Neue Version der Factory übernehmen (z. B. nach dem Merge eines Verbesserungs-PRs)\nset -e\ncd %s && git pull --ff-only && docker build -q -t software-factory-job:latest -f image/Dockerfile . >/dev/null && systemctl restart software-factory && echo "Factory aktualisiert: $(git log -1 --format=%%s)"\n' "$FACTORY_DIR" > /usr/local/bin/factory-rollout
 chmod +x /usr/local/bin/factory-rollout
 
+say "Befehl factory-obs einrichten"
+printf '#!/bin/sh\nexec %s/ops/observability/obs.sh "$@"\n' "$FACTORY_DIR" > /usr/local/bin/factory-obs
+chmod +x /usr/local/bin/factory-obs
+
+# Observability-Stack (optional): nur wenn observability.domain in der Config steht
+if jq -e '(.observability.domain // "") | length > 0' "$CONF_DIR/config.json" >/dev/null 2>&1; then
+  say "Observability-Stack (Grafana, Loki, Prometheus)"
+  ops/observability/obs.sh install || echo "  ! Observability-Stack nicht vollständig eingerichtet, Details oben. Erneut: factory-obs install"
+fi
+
 say "Runner als Dienst einrichten"
 sed "s#/opt/software-factory#$FACTORY_DIR#g" deploy/software-factory.service > /etc/systemd/system/software-factory.service
 systemctl daemon-reload
@@ -82,6 +92,11 @@ MISSING=()
 grep -qE '^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=.' "$CONF_DIR/secrets.env" || MISSING+=("Claude-Login: Token in $CONF_DIR/secrets.env (siehe Anleitung)")
 gh auth status >/dev/null 2>&1 || MISSING+=("GitHub-Login: gh auth login -s project")
 jq -e '.repos | map(select(. != "DEIN-GITHUB-NAME/dein-repo")) | length > 0' "$CONF_DIR/config.json" >/dev/null || MISSING+=("Repo anbinden: ./scripts/add-repo.sh besitzer/repo")
+# Incident-Intake eingeschaltet, aber ohne Schlüssel: nur ein Hinweis, die Factory läuft trotzdem
+if jq -e '.incidents.enabled == true' "$CONF_DIR/config.json" >/dev/null 2>&1; then
+  grep -qE '^HEALTHCHECKS_API_KEY=.' "$CONF_DIR/secrets.env" || echo "  Hinweis: incidents.enabled, aber HEALTHCHECKS_API_KEY fehlt in $CONF_DIR/secrets.env (healthchecks.io bleibt aus)"
+  grep -qE '^GRAFANA_TOKEN=.' "$CONF_DIR/secrets.env" || echo "  Hinweis: incidents.enabled, aber GRAFANA_TOKEN fehlt in $CONF_DIR/secrets.env (factory-obs install legt ihn an)"
+fi
 
 if [ ${#MISSING[@]} -eq 0 ]; then
   systemctl restart software-factory

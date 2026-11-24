@@ -1,0 +1,428 @@
+{
+  "uid": "factory-projekt",
+  "title": "Projekt",
+  "tags": [
+    "factory"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "projekt",
+        "label": "Projekt",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(projekt)",
+          "refId": "projekt"
+        },
+        "definition": "label_values(projekt)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "umgebung",
+        "label": "Umgebung",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values({projekt=\"$projekt\"}, umgebung)",
+          "refId": "umgebung"
+        },
+        "definition": "label_values({projekt=\"$projekt\"}, umgebung)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Bereit (/readyz)",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "min by (umgebung) (probe_success{projekt=\"$projekt\", umgebung=~\"$umgebung\"})",
+          "legendFormat": "{{umgebung}}",
+          "instant": true
+        }
+      ],
+      "description": "Probe von Grafana Alloy auf /readyz der App (prometheus.exporter.blackbox). Den Heartbeat-Status zeigt healthchecks.io.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "nicht bereit",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "bereit",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "keine Daten"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Seit dem letzten Deploy",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "time() - max by (umgebung) (container_start_time_seconds{projekt=\"$projekt\", umgebung=~\"$umgebung\", dienst=\"app\"})",
+          "legendFormat": "{{umgebung}}",
+          "instant": true
+        }
+      ],
+      "description": "Startzeit des Containers \"app\" (cAdvisor). Ein Deploy startet ihn neu.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "noValue": "keine Daten"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Fehler in den Logs (je 5 Minuten)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (umgebung, dienst) (count_over_time({projekt=\"$projekt\", umgebung=~\"$umgebung\"} | json | level=~\"(?i)(error|fatal|50|60)\" [5m]))",
+          "legendFormat": "{{umgebung}} · {{dienst}}",
+          "queryType": "range"
+        }
+      ],
+      "description": "Logzeilen mit level error oder fatal (JSON-Logs, auch pino 50/60).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Arbeitsspeicher je Dienst",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (umgebung, dienst) (container_memory_working_set_bytes{projekt=\"$projekt\", umgebung=~\"$umgebung\"})",
+          "legendFormat": "{{umgebung}} · {{dienst}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "CPU je Dienst",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (umgebung, dienst) (rate(container_cpu_usage_seconds_total{projekt=\"$projekt\", umgebung=~\"$umgebung\"}[5m]))",
+          "legendFormat": "{{umgebung}} · {{dienst}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "description": "1 = ein voller CPU-Kern"
+    },
+    {
+      "id": 6,
+      "title": "Host: Festplatte und Arbeitsspeicher",
+      "type": "bargauge",
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (instance) (1 - node_filesystem_avail_bytes{projekt=\"$projekt\", umgebung=~\"$umgebung\", fstype!~\"tmpfs|overlay|squashfs\"} / node_filesystem_size_bytes{projekt=\"$projekt\", umgebung=~\"$umgebung\", fstype!~\"tmpfs|overlay|squashfs\"})",
+          "legendFormat": "Platte {{instance}}",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (instance) (1 - node_memory_MemAvailable_bytes{projekt=\"$projekt\", umgebung=~\"$umgebung\"} / node_memory_MemTotal_bytes{projekt=\"$projekt\", umgebung=~\"$umgebung\"})",
+          "legendFormat": "RAM {{instance}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Letzte Backups und Restore-Tests",
+      "type": "logs",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{dienst=~\"factory-(backup|restore-test)\"} |= \"$projekt-\"",
+          "queryType": "range"
+        }
+      ],
+      "description": "Journal der systemd-Units factory-backup und factory-restore-test auf den Hosts (Zeilen mit <projekt>-<umgebung>).",
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      }
+    },
+    {
+      "id": 8,
+      "title": "Fehler-Logzeilen",
+      "type": "logs",
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{projekt=\"$projekt\", umgebung=~\"$umgebung\"} | json | level=~\"(?i)(error|fatal|50|60)\"",
+          "queryType": "range"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
+    }
+  ]
+}

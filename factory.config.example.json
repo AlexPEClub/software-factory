@@ -20,5 +20,22 @@
   "factoryRepo": "AUTO",
   "improve": {
     "everyDays": 0
+  },
+  "heartbeatUrl": "",
+  "observability": {
+    "domain": ""
+  },
+  "incidents": {
+    "enabled": false,
+    "projects": {
+      "dein-projekt": "DEIN-GITHUB-NAME/dein-repo"
+    },
+    "fallbackRepo": "",
+    "healthchecks": {
+      "apiUrl": "https://healthchecks.io/api/v3/"
+    },
+    "grafana": {
+      "url": "http://127.0.0.1:3300"
+    }
   }
 }

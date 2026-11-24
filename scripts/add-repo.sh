@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Bindet ein GitHub-Repo an die Factory an: legt die Labels an, trägt das Repo in die Config ein
-# und verknüpft es mit dem Board. Gibt es noch kein Board, wird eins angelegt.
+# Bindet ein GitHub-Repo an die Factory an: legt die Labels und die GitHub-Umgebungen staging und production an,
+# trägt das Repo in die Config ein und verknüpft es mit dem Board. Gibt es noch kein Board, wird eins angelegt.
 #   ./scripts/add-repo.sh besitzer/repo
 # Für jedes weitere Repo einfach erneut ausführen; alle Repos teilen sich ein Board.
 set -euo pipefail
@@ -22,8 +22,45 @@ label "factory:accepting"      "1D76DB" "Factory: unabhängige Abnahme läuft"
 label "factory:review"         "E99695" "Factory: PR bereit, du bist dran"
 label "factory:done"           "0E8A16" "Factory: gemergt"
 label "factory:failed"         "D93F0B" "Factory: technisch hängen geblieben"
+# Betrieb: Alarme (Runner) und Deploy-Fehler (Pipeline). Diese Issues bearbeitet die Factory nie von selbst.
+label "incident"               "E11D21" "Alarm aus Monitoring oder Watchdog, nie automatisch Aufgabe der Factory"
+label "deploy-failed"          "B60205" "Deploy fehlgeschlagen, von der Pipeline gemeldet"
 # Labels aus der ersten Version entfernen
 for old in queued triage investigating implementing verifying pr waiting; do gh label delete "factory:$old" -R "$REPO" --yes >/dev/null 2>&1 || true; done
+
+# GitHub-Umgebungen für die Pipeline (Betriebskonventionen, Abschnitt 13): Secrets für staging und production gibt es
+# nur in Läufen auf main, production braucht zusätzlich die Freigabe des Repo-Besitzers.
+ERR=$(mktemp)
+only_main() { # UMGEBUNG
+  local have
+  have=$(gh api "repos/$REPO/environments/$1/deployment-branch-policies" --jq '.branch_policies[] | select(.type != "tag") | .name' 2>/dev/null || true)
+  grep -qx main <<<"$have" || gh api -X POST "repos/$REPO/environments/$1/deployment-branch-policies" -f name=main -f type=branch >/dev/null
+}
+environment() { # UMGEBUNG JSON [JSON-ohne-Freigabe] [Hinweis]
+  local note="${4:-}"
+  if printf '%s' "$2" | gh api -X PUT "repos/$REPO/environments/$1" --input - >/dev/null 2>"$ERR"; then :
+  elif [ -n "${3:-}" ] && printf '%s' "$3" | gh api -X PUT "repos/$REPO/environments/$1" --input - >/dev/null 2>>"$ERR"; then
+    note=""
+    echo "  ! $1 ohne Pflicht-Freigabe angelegt. GitHub erlaubt Freigaben in privaten Repos erst ab GitHub Pro/Team."
+    echo "    Bis dahin: production-Deploys nur von Hand starten, Freigabe später unter Settings → Environments setzen."
+  else
+    echo "  ! Umgebung $1 nicht angelegt: $(tr '\n' ' ' < "$ERR")"; return 0
+  fi
+  if only_main "$1" 2>>"$ERR"; then echo "  ✓ $1 (nur Branch main$note)"
+  else echo "  ! $1 angelegt, Branch-Regel main fehlt: $(tr '\n' ' ' < "$ERR")"; fi
+}
+echo "Umgebungen in $REPO:"
+BRANCHES='"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}'
+environment staging "{$BRANCHES}"
+OWNER_TYPE=$(gh api "repos/$REPO" --jq .owner.type)
+OWNER_ID=$(gh api "repos/$REPO" --jq .owner.id)
+if [ "$OWNER_TYPE" = "User" ]; then
+  environment production "{\"reviewers\": [{\"type\": \"User\", \"id\": $OWNER_ID}], \"prevent_self_review\": false, $BRANCHES}" "{$BRANCHES}" ", Freigabe durch ${REPO%%/*}"
+else
+  environment production "{$BRANCHES}" "" ""
+  echo "  ! ${REPO%%/*} ist eine Organisation: Pflicht-Freigabe für production unter Settings → Environments selbst eintragen."
+fi
+rm -f "$ERR"
 
 if [ -f "$CONF" ]; then
   TMP=$(mktemp)

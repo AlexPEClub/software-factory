@@ -1,0 +1,15 @@
+# Prometheus nimmt Metriken per remote_write an (Grafana Alloy auf jedem Host, über Caddy mit Basic Auth).
+# Selbst abgefragt werden nur die Dienste dieses Stacks.
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s
+
+scrape_configs:
+  - job_name: observability
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels: { projekt: factory, umgebung: production, dienst: prometheus }
+      - targets: ["loki:3100"]
+        labels: { projekt: factory, umgebung: production, dienst: loki }
+      - targets: ["grafana:3000"]
+        labels: { projekt: factory, umgebung: production, dienst: grafana }

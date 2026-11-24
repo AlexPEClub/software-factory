@@ -1,0 +1,101 @@
+# Standard-Alarme für alle Projekte. Der Runner der Factory holt aktive Alarme über die Alertmanager-API
+# von Grafana und öffnet je Alarm ein Issue mit Label "incident" im Repo des Projekts (Label "projekt").
+# Benachrichtigungen (Kontaktpunkte) braucht es dafür nicht.
+# Ob eine App läuft, meldet healthchecks.io (Heartbeat nur bei grünem /readyz), deshalb hier kein Alarm dafür.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: projekte
+    folder: Factory
+    interval: 1m
+    rules:
+      - uid: factory-log-errors
+        title: Viele Fehler in den Logs
+        condition: C
+        data:
+          - refId: A
+            queryType: range
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: loki
+            model:
+              refId: A
+              queryType: range
+              editorMode: code
+              expr: 'sum by (projekt, umgebung) (count_over_time({umgebung=~"staging|production"} | json | level=~"(?i)(error|fatal|50|60)" [5m]))'
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+              settings: { mode: dropNN }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [20] }
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels: { schwere: warnung }
+        annotations:
+          summary: 'Mehr als 20 Fehler in 5 Minuten in den Logs von {{ $labels.projekt }} ({{ $labels.umgebung }})'
+          description: 'Zuletzt {{ $values.B.Value }} Fehler-Logzeilen in 5 Minuten. Details im Dashboard "Projekt" in Grafana.'
+
+      - uid: factory-disk-full
+        title: Speicherplatz knapp
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: 'max by (projekt, umgebung, instance) (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"})'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels: { schwere: kritisch }
+        annotations:
+          summary: 'Festplatte auf {{ $labels.instance }} ({{ $labels.projekt }}, {{ $labels.umgebung }}) zu über 90 % voll'
+          description: 'Belegt: {{ humanizePercentage $values.A.Value }}.'
+
+      - uid: factory-memory-full
+        title: Arbeitsspeicher knapp
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: 'max by (projekt, umgebung, instance) (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels: { schwere: warnung }
+        annotations:
+          summary: 'Arbeitsspeicher auf {{ $labels.instance }} ({{ $labels.projekt }}, {{ $labels.umgebung }}) zu über 90 % belegt'
+          description: 'Belegt: {{ humanizePercentage $values.A.Value }}.'

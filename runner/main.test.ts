@@ -226,6 +226,9 @@ let containerLog = "";
 let listIssues = "[]";
 /** Inhalt von .factory/setup.json je Repo auf dem Standard-Branch (fehlt: wie ein Repo ohne Datei) */
 const setupFiles: Record<string, string> = {};
+/** Offene Issues mit Label incident je Repo (gh issue list --label incident) */
+const incidentIssues: Record<string, any[]> = {};
+let nextIssue = 100;
 (globalThis as any).Bun = {
   spawn(cmd: string[], opts: any) {
     const call: Call = { cmd, stdin: "" };
@@ -237,7 +240,10 @@ const setupFiles: Record<string, string> = {};
     if (cmd[0] === "gh" && cmd[1] === "api" && String(cmd[2]).includes("/git/ref/heads/")) out = headSha + "\n";
     if (cmd[0] === "gh" && cmd[1] === "pr" && cmd[2] === "diff") out = "src/app/page.tsx\n";
     if (cmd[0] === "docker" && cmd[1] === "logs") out = containerLog;
-    if (cmd[0] === "gh" && cmd[1] === "issue" && cmd[2] === "list") out = cmd.includes("factory:review") ? "[]" : listIssues;
+    if (cmd[0] === "gh" && cmd[1] === "issue" && cmd[2] === "list") {
+      out = cmd.includes("factory:review") ? "[]" : cmd.includes("incident") ? JSON.stringify(incidentIssues[cmd[cmd.indexOf("-R") + 1]] ?? []) : listIssues;
+    }
+    if (cmd[0] === "gh" && cmd[1] === "issue" && cmd[2] === "create") out = `https://github.com/${cmd[cmd.indexOf("-R") + 1]}/issues/${nextIssue++}\n`;
     if (cmd[0] === "gh" && cmd[1] === "pr" && cmd[2] === "list") out = "[]";
     return {
       stdout: new Blob([out]).stream(), stderr: new Blob([""]).stream(), kill() {},
@@ -467,4 +473,219 @@ test("factory-report: Rückfrage auf Deutsch (Standard), Englisch und für ander
   assert.ok(en.comment.includes("### ❓ Question") && en.comment.includes("Just reply here"), en.comment);
   const fr = reportComment("fr-CA", ["rejected", "Raison", "--question", "Quoi faire"]);
   assert.ok(fr.comment.includes("### ⛔ The factory cannot build it like this"), fr.comment);
+});
+
+// ---------- Incident-Intake (healthchecks.io und Grafana simuliert, kein Netz) ----------
+
+import { fetchGrafanaAlerts, fetchHealthchecks, heartbeat, incidentIntake, isFactoryWork, projectForCheck, syncIncidents, type Alert } from "./main.ts";
+
+const fetchCalls: { url: string; headers: Record<string, string> }[] = [];
+let hcResponse: any = { checks: [] };
+let gfResponse: any = [];
+let gfStatus = 200;
+(globalThis as any).fetch = async (url: string | URL, init: any = {}) => {
+  const u = String(url);
+  fetchCalls.push({ url: u, headers: init.headers ?? {} });
+  if (u.includes("/api/v3/checks/")) return new Response(JSON.stringify(hcResponse));
+  if (u.includes("/api/alertmanager/grafana/api/v2/alerts")) return new Response(JSON.stringify(gfResponse), { status: gfStatus });
+  if (u.startsWith("https://hc-ping.example/")) return new Response("OK");
+  throw new Error(`unerwarteter Aufruf: ${u}`);
+};
+process.env.HEALTHCHECKS_API_KEY = "hc-lesen";
+process.env.GRAFANA_TOKEN = "glsa_test";
+
+const projects = { "meine-app": "a/app", shop: "a/shop", "shop-admin": "a/shop-admin" };
+const icfg = (extra: Partial<Config> = {}) => cfg({ incidents: { enabled: true, projects, fallbackRepo: "a/factory" }, ...extra });
+const alert = (key: string, project = "meine-app"): Alert =>
+  ({ key, source: key.startsWith("hc-") ? "healthchecks" : "grafana", project, title: `Alarm ${key}`, details: ["Status: down"] });
+const openIncident = (number: number, key: string, login = "alex") =>
+  ({ number, body: `<!-- software-factory:incident:${key} -->\nText`, author: { login }, createdAt: "2026-11-24T10:00:00Z" });
+const ghCalls = (sub: string) => calls.filter((x) => x.cmd[0] === "gh" && x.cmd[1] === "issue" && x.cmd[2] === sub);
+const resetIncidents = () => { calls.length = 0; fetchCalls.length = 0; for (const k of Object.keys(incidentIssues)) delete incidentIssues[k]; };
+
+test("Never-Factory: Issues mit incident oder deploy-failed sind nie Aufgaben der Factory", async () => {
+  assert.equal(isFactoryWork({ labels: [{ name: "factory" }] }), true);
+  assert.equal(isFactoryWork({ labels: [{ name: "factory" }, { name: "incident" }] }), false);
+  assert.equal(isFactoryWork({ labels: [{ name: "deploy-failed" }, { name: "factory" }] }), false);
+  // Auch wenn jemand das Label factory setzt: tick startet keinen Lauf und setzt keinen Status
+  listIssues = JSON.stringify([{ ...issue([]), labels: [{ name: "factory" }, { name: "incident" }] }]);
+  try {
+    const dataDir = tmp();
+    calls.length = 0;
+    await tick(cfg({ dataDir, repos: ["a/b"], maxParallel: 2 }));
+    assert.ok(!existsSync(join(dataDir, "jobs", "a__b__7")));
+    assert.ok(!calls.some((x) => x.cmd[0] === "docker" && x.cmd[1] === "run"));
+    assert.ok(!calls.some((x) => x.cmd[1] === "issue" && x.cmd[2] === "edit"), "kein Status-Label");
+  } finally { listIssues = "[]"; }
+});
+
+test("Zuordnung: Tag des Checks, sonst längster Namensanfang, Grafana über Label projekt", async () => {
+  assert.equal(projectForCheck({ tags: "prod shop", slug: "irgendwas" }, projects), "shop");
+  assert.equal(projectForCheck({ slug: "shop-admin-production-heartbeat" }, projects), "shop-admin");
+  assert.equal(projectForCheck({ slug: "shop-staging-backup" }, projects), "shop");
+  assert.equal(projectForCheck({ name: "meine-app" }, projects), "meine-app");
+  assert.equal(projectForCheck({ slug: "shopping-staging" }, projects), "");
+  assert.equal(projectForCheck({ slug: "x" }), "");
+
+  resetIncidents();
+  hcResponse = { checks: [
+    { name: "shop-admin-production", slug: "shop-admin-production", tags: "", status: "down", unique_key: "a1b2c3", last_ping: "2026-11-24T09:00:00+00:00", grace: 300 },
+    { name: "meine-app-staging", slug: "meine-app-staging", tags: "", status: "up", unique_key: "d4e5f6" },
+    { name: "spaet", slug: "spaet", status: "grace", unique_key: "0987" },
+  ] };
+  const hc = await fetchHealthchecks(icfg());
+  assert.equal(hc?.length, 1, "nur Status down");
+  assert.equal(hc![0].key, "hc-a1b2c3");
+  assert.equal(hc![0].project, "shop-admin");
+  assert.equal(fetchCalls[0].url, "https://healthchecks.io/api/v3/checks/");
+  assert.equal(fetchCalls[0].headers["X-Api-Key"], "hc-lesen");
+
+  gfResponse = [
+    { fingerprint: "f00dbeef", status: { state: "active" }, labels: { alertname: "Speicherplatz knapp", projekt: "meine-app", umgebung: "production", __alert_rule_uid__: "x" },
+      annotations: { summary: "Platte voll" }, startsAt: "2026-11-24T08:00:00Z", generatorURL: "https://grafana.example/alerting/x" },
+    { fingerprint: "stumm", status: { state: "suppressed" }, labels: { alertname: "Stumm", projekt: "shop" } },
+  ];
+  const gf = await fetchGrafanaAlerts(icfg({ incidents: { enabled: true, projects, grafana: { url: "http://127.0.0.1:3300/" } } }));
+  assert.equal(gf?.length, 1, "nur aktive, nicht stummgeschaltete");
+  assert.equal(gf![0].key, "gf-f00dbeef");
+  assert.equal(gf![0].project, "meine-app");
+  assert.equal(gf![0].title, "Speicherplatz knapp (production)");
+  assert.ok(!gf![0].details.join(" ").includes("__alert_rule_uid__"));
+  const gfCall = fetchCalls.find((f) => f.url.includes("alertmanager"))!;
+  assert.ok(gfCall.url.startsWith("http://127.0.0.1:3300/api/alertmanager/grafana/api/v2/alerts?active=true"), gfCall.url);
+  assert.equal(gfCall.headers.Authorization, "Bearer glsa_test");
+});
+
+test("Quelle ohne Schlüssel oder mit Fehler liefert null statt einer leeren Liste", async () => {
+  const key = process.env.HEALTHCHECKS_API_KEY;
+  delete process.env.HEALTHCHECKS_API_KEY;
+  try { assert.equal(await fetchHealthchecks(icfg()), null); } finally { process.env.HEALTHCHECKS_API_KEY = key; }
+  gfStatus = 500;
+  try { assert.equal(await fetchGrafanaAlerts(icfg()), null); } finally { gfStatus = 200; }
+});
+
+test("Pro Alarm genau ein Issue mit Label incident, nie factory, im Repo des Projekts", async () => {
+  resetIncidents();
+  const config = icfg();
+  await syncIncidents(config, [{ source: "healthchecks", alerts: [alert("hc-a1")] }, { source: "grafana", alerts: [alert("gf-b2", "shop")] }]);
+  const created = ghCalls("create");
+  assert.equal(created.length, 2);
+  for (const c of created) {
+    assert.equal(c.cmd[c.cmd.indexOf("--label") + 1], "incident");
+    assert.equal(c.cmd.filter((x) => x === "--label").length, 1);
+    assert.ok(!c.cmd.some((x) => x.startsWith("factory")), c.cmd.join(" "));
+  }
+  const app = created.find((c) => c.cmd.includes("a/app"))!;
+  assert.ok(app.stdin.startsWith("<!-- software-factory:incident:hc-a1 -->"), app.stdin);
+  assert.ok(app.stdin.includes("Alarm von healthchecks.io") && app.stdin.includes("`meine-app`"), app.stdin);
+  assert.ok(created.some((c) => c.cmd.includes("a/shop")));
+
+  // Nächster Durchlauf: Das Issue ist offen → kein zweites
+  incidentIssues["a/app"] = [openIncident(100, "hc-a1")];
+  incidentIssues["a/shop"] = [openIncident(101, "gf-b2")];
+  calls.length = 0;
+  await syncIncidents(config, [{ source: "healthchecks", alerts: [alert("hc-a1")] }, { source: "grafana", alerts: [alert("gf-b2", "shop")] }]);
+  assert.equal(ghCalls("create").length, 0);
+  assert.equal(ghCalls("close").length, 0);
+  assert.equal(ghCalls("comment").length, 0);
+});
+
+test("Doppelte Issues zu einem Alarm: das älteste bleibt, die anderen werden geschlossen", async () => {
+  resetIncidents();
+  incidentIssues["a/app"] = [openIncident(205, "hc-a1"), openIncident(201, "hc-a1")];
+  await syncIncidents(icfg(), [{ source: "healthchecks", alerts: [alert("hc-a1")] }, { source: "grafana", alerts: [] }]);
+  assert.equal(ghCalls("create").length, 0);
+  assert.deepEqual(ghCalls("close").map((c) => c.cmd[3]), ["205"]);
+  assert.ok(ghCalls("comment")[0].stdin.includes("Doppelt zu #201"));
+});
+
+test("Erholung: kommentieren und schließen, aber nur wenn die Quelle erreichbar war", async () => {
+  resetIncidents();
+  incidentIssues["a/app"] = [openIncident(300, "hc-a1"), openIncident(301, "gf-c3")];
+  // healthchecks.io nicht erreichbar, Grafana ohne Alarm → nur das Grafana-Issue wird geschlossen
+  await syncIncidents(icfg(), [{ source: "healthchecks", alerts: null }, { source: "grafana", alerts: [] }]);
+  assert.deepEqual(ghCalls("close").map((c) => c.cmd[3]), ["301"]);
+  assert.ok(ghCalls("close")[0].cmd.includes("completed"));
+  const comment = ghCalls("comment")[0];
+  assert.equal(comment.cmd[3], "301");
+  assert.ok(comment.stdin.includes("Alarm vorbei") && comment.stdin.includes("Grafana"), comment.stdin);
+  assert.equal(ghCalls("create").length, 0);
+});
+
+test("Fremde Issues mit gefälschtem Marker zählen nicht und werden nie geschlossen", async () => {
+  resetIncidents();
+  incidentIssues["a/app"] = [openIncident(400, "hc-a1", "fremd"), openIncident(401, "gf-zz", "fremd")];
+  await syncIncidents(icfg(), [{ source: "healthchecks", alerts: [alert("hc-a1")] }, { source: "grafana", alerts: [] }]);
+  assert.equal(ghCalls("create").length, 1, "eigenes Issue trotz fremdem Marker");
+  assert.equal(ghCalls("close").length, 0);
+});
+
+test("Von Hand geschlossen, Alarm läuft noch: kein neues Issue; nach Erholung und neuem Alarm wieder eins", async () => {
+  resetIncidents();
+  const config = icfg();
+  const firing = [{ source: "healthchecks" as const, alerts: [alert("hc-a1")] }, { source: "grafana" as const, alerts: [] }];
+  await syncIncidents(config, firing);
+  assert.equal(ghCalls("create").length, 1);
+  calls.length = 0; // Issue wurde von Hand geschlossen: keine offenen Issues
+  await syncIncidents(config, firing);
+  assert.equal(ghCalls("create").length, 0);
+  // healthchecks.io zwischendurch nicht erreichbar: Zustand bleibt
+  await syncIncidents(config, [{ source: "healthchecks", alerts: null }, { source: "grafana", alerts: [] }]);
+  await syncIncidents(config, firing);
+  assert.equal(ghCalls("create").length, 0);
+  // Erholt, dann neuer Alarm
+  await syncIncidents(config, [{ source: "healthchecks", alerts: [] }, { source: "grafana", alerts: [] }]);
+  await syncIncidents(config, firing);
+  assert.equal(ghCalls("create").length, 1);
+});
+
+test("Nicht zugeordnete Alarme landen im Auffang-Repo, ohne Auffang-Repo nirgends", async () => {
+  resetIncidents();
+  await syncIncidents(icfg(), [{ source: "grafana", alerts: [alert("gf-x1", "unbekannt")] }]);
+  const created = ghCalls("create");
+  assert.equal(created.length, 1);
+  assert.ok(created[0].cmd.includes("a/factory"));
+  assert.ok(created[0].stdin.includes("`unbekannt`"), created[0].stdin);
+  resetIncidents();
+  await syncIncidents(cfg({ incidents: { enabled: true, projects } }), [{ source: "grafana", alerts: [alert("gf-x1", "unbekannt")] }]);
+  assert.equal(ghCalls("create").length, 0);
+});
+
+test("Englisches Projekt: Incident-Texte auf Englisch, Zugangsdaten entfernt", async () => {
+  resetIncidents();
+  setupFiles["en/ops"] = '{"language": "en"}';
+  const config = cfg({ incidents: { enabled: true, projects: { ops: "en/ops" } } });
+  const a = { ...alert("gf-e1", "ops"), details: ["Token ghp_0123456789abcdefghijABCDEF im Log"] };
+  await syncIncidents(config, [{ source: "grafana", alerts: [a] }]);
+  const body = ghCalls("create")[0].stdin;
+  assert.ok(body.includes("Alert from Grafana") && body.includes("never works on incidents by itself"), body);
+  assert.ok(!body.includes("ghp_0123"));
+  incidentIssues["en/ops"] = [openIncident(500, "gf-e1")];
+  calls.length = 0;
+  await syncIncidents(config, [{ source: "grafana", alerts: [] }]);
+  assert.ok(ghCalls("comment")[0].stdin.includes("Alert over"));
+});
+
+test("tick: Heartbeat vor dem Intake, Intake nur wenn eingeschaltet", async () => {
+  resetIncidents();
+  hcResponse = { checks: [{ name: "meine-app-production", slug: "meine-app-production", status: "down", unique_key: "abc" }] };
+  gfResponse = [];
+  await tick(cfg({ repos: [], heartbeatUrl: "https://hc-ping.example/uuid" }));
+  assert.deepEqual(fetchCalls.map((f) => f.url), ["https://hc-ping.example/uuid"], "ohne incidents.enabled keine Abfrage");
+  assert.equal(ghCalls("create").length, 0);
+
+  resetIncidents();
+  await tick(icfg({ repos: [], heartbeatUrl: "https://hc-ping.example/uuid" }));
+  assert.equal(fetchCalls[0].url, "https://hc-ping.example/uuid");
+  assert.ok(fetchCalls.some((f) => f.url.includes("/api/v3/checks/")));
+  assert.ok(fetchCalls.some((f) => f.url.includes("/api/alertmanager/")));
+  const created = ghCalls("create");
+  assert.equal(created.length, 1);
+  assert.ok(created[0].cmd.includes("a/app") && created[0].stdin.includes("software-factory:incident:hc-abc"));
+
+  // Heartbeat-Fehler stören den Durchlauf nicht
+  resetIncidents();
+  await heartbeat(cfg({ heartbeatUrl: "https://nicht-erreichbar.example/" }));
+  await incidentIntake(cfg());
+  assert.equal(fetchCalls.length, 1);
 });
