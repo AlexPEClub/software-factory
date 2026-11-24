@@ -38,7 +38,11 @@ if ! gh api "repos/$REPO/branches/$ASSET_BRANCH" >/dev/null 2>&1; then
 fi
 REMOTE_PATH="screenshots/issue-$ISSUE/$(date +%s)-$SLUG.png"
 base64 -w0 "$FILE" > /tmp/shot.b64
-jq -n --arg msg "Screenshot für #$ISSUE: $CAPTION" --arg branch "$ASSET_BRANCH" --rawfile content /tmp/shot.b64 \
+case "$(printf '%s' "${FACTORY_LANGUAGE:-de}" | cut -d- -f1 | tr '[:upper:]' '[:lower:]')" in
+  de) MSG="Screenshot für #$ISSUE: $CAPTION" ;;
+  *)  MSG="Screenshot for #$ISSUE: $CAPTION" ;;
+esac
+jq -n --arg msg "$MSG" --arg branch "$ASSET_BRANCH" --rawfile content /tmp/shot.b64 \
   '{message:$msg, branch:$branch, content:$content}' \
   | gh api -X PUT "repos/$REPO/contents/$REMOTE_PATH" --input - >/dev/null
 

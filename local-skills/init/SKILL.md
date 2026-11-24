@@ -20,15 +20,29 @@ Interview the user until you reach a **complete shared understanding**:
 
 ## Before Starting
 1. Read `docs/briefing.md`. If it contains a real briefing, note what it already answers and ask **only the gaps**. Do not re-ask what the briefing says.
-2. Read `docs/PRD.md`, `docs/stack.md`, `features/INDEX.md`. If the PRD is already filled in (not the template): "Dieses Projekt ist schon initialisiert. Nutze `/write-spec` für das nächste Feature." → Stop.
-3. Write everything in the language of the briefing / the user (German by default).
+2. Read `docs/PRD.md`, `docs/stack.md`, `features/INDEX.md`. If the PRD is already filled in (not the template): tell the user, in their language, that the project is already initialized and to use `/write-spec` for the next feature → Stop.
+3. Talk to the user in the language they write in. Everything you write into the project follows the **project language** (next section).
+
+## Mandatory First Question: Project Language
+The project language decides what language the factory writes in for this project: PRD and all other documents, specs, issue comments, pull requests and the text of commit messages.
+
+1. Detect the language of `docs/briefing.md` (without a briefing: of the user's first message).
+2. Ask this as your **first** interview question, with the detected language as the recommendation, e.g. for a German briefing:
+   > "Your briefing is in German. Should the factory write everything for this project in German (documents, specs, issues, pull requests, commit texts), or in another language?"
+3. Save the answer as a BCP 47 code (`de`, `en`, `fr`, `pt-BR` …) in `.factory/setup.json` → `"language"` (see "Set Up the Project Skeleton"). From now on write every document in that language.
+4. Tell the user what the choice means where relevant:
+   - German and English are fully supported: the factory's fixed texts (status comments, check tables) and its templates exist in both.
+   - Any other language works for everything the agents write; the factory's fixed status comments then appear in English.
+   - Code identifiers, code comments and conventional-commit prefixes (`feat(PROJ-1):`) are always English.
+   - Specs use `AK-1` acceptance criterion IDs in German and `AC-1` in every other language.
 
 ## Interview Phase
 Cover through natural conversation:
 - Core problem, target users and their pain
 - Must-haves for the MVP vs. later
 - Alternatives, what is different here
-- Constraints: time, budget, team, data protection (personal data? which law, e.g. DSGVO), hosting region
+- Constraints: time, budget, team, data protection (personal data? which law, e.g. GDPR/DSGVO), hosting region
+- **UI language(s) of the app** — separate from the project language: which language(s) must the product's interface offer, and is translation (i18n) needed now or later? Recommend from the target users (e.g. a German UI for a project documented in English is fine).
 - Success metrics, non-goals
 
 ### Mandatory: Stack Decision
@@ -40,15 +54,16 @@ Resolve before the feature map. Ask what the product must run on (web app, API, 
 Resolve with the user: language/runtime, framework, UI, data storage, login, tests, package manager, hosting.
 
 ### Mandatory: Design System
-> "Gibt es ein Design-System, Markenrichtlinien oder Vorbilder, an die ich mich halten soll?"
+Ask (in the user's language): is there a design system, brand guidelines or reference products to follow?
 Options: file/link from the user, a short description (colors, fonts, feel), or you propose one from two quick questions (what the product is, one adjective for the feel). `docs/design-system.md` gets written in every case.
 
 ## Write the Documents (show each draft, save after approval)
+Write them in the project language. The project template may contain German headings and placeholder texts; if the project language is not German, translate them while filling in the documents.
 
-1. **`docs/PRD.md`**: Vision, Zielgruppe, Kernfunktionen (2–3 sentences, no feature table), Erfolgskriterien, Rahmenbedingungen (incl. `Datenschutz:` and `Hosting:` lines), Nicht-Ziele.
-2. **`docs/stack.md`**: fill every line of the template. Under **Stack-Packs** list the factory packs that apply (`nextjs`, `supabase`, … — only names that exist in the Software Factory repo under `workflows/starter-kit/stacks/`; if none fits, write "keine" and put the key conventions directly under **Konventionen**).
+1. **`docs/PRD.md`**: vision, target group, core functions (2–3 sentences, no feature table), success criteria, constraints (incl. lines for data protection, hosting and **UI language(s)**, e.g. `Datenschutz:`, `Hosting:`, `UI-Sprache(n):` in German or `Data protection:`, `Hosting:`, `UI language(s):` in English), non-goals.
+2. **`docs/stack.md`**: fill every line of the template. Under **Stack-Packs** list the factory packs that apply (`nextjs`, `supabase`, … — only names that exist in the Software Factory repo under `workflows/starter-kit/stacks/`; if none fits, write "none" in the project language and put the key conventions directly under the conventions heading, **Konventionen** in the German template).
 3. **`docs/design-system.md`**
-4. **`features/INDEX.md`**: feature map. Each feature = one testable, deployable unit (Single Responsibility). Columns: ID (`PROJ-1` …), Feature, Status `Roadmap`, Ordner (empty for now). Under the table: **Bau-Reihenfolge** with priorities and dependencies (`P0: PROJ-1 → PROJ-2 · P1: PROJ-3 (braucht PROJ-2)`). Update "Nächste freie ID".
+4. **`features/INDEX.md`**: feature map. Each feature = one testable, deployable unit (Single Responsibility). Columns: ID (`PROJ-1` …), Feature, Status `Roadmap`, Folder (German: Ordner; empty for now). Under the table: the **build order** with priorities and dependencies (German: `Bau-Reihenfolge`, `P0: PROJ-1 → PROJ-2 · P1: PROJ-3 (braucht PROJ-2)`). Update the next free ID. Status values (`Roadmap`, `Planned` …) stay in English in every language.
    - Project setup (installing the framework, creating a database project, environment variables) is **not a feature**. You do it in the next step.
    - Login/accounts **are** a feature with real user stories, usually the first one if needed.
 
@@ -58,13 +73,14 @@ After the documents are approved:
 2. **Fill `.factory/setup.json`** for this stack. Every command must work on a fresh Linux machine after `install`:
    ```json
    {
+     "language": "de",
      "install": "npm ci",
      "dev": "npm run dev -- -p $PORT",
      "preview": "npm run build && npm run start -- -p $PORT -H 0.0.0.0",
      "checks": { "lint": "npm run lint", "typecheck": "npx tsc --noEmit", "test": "npm test", "build": "npm run build" }
    }
    ```
-   `dev` and `preview` must listen on `$PORT` and on all interfaces (`0.0.0.0`). Remove the `_hinweis` key.
+   `language` is the project language from the first question (BCP 47). `dev` and `preview` must listen on `$PORT` and on all interfaces (`0.0.0.0`). Remove the `_hinweis` key.
 3. **Run every check once locally** and fix until all pass.
 4. **Runtime not covered by the factory?** The factory job image has Node and Python (uv). For anything else (PHP, Ruby, Go, Java …) create `.factory/Dockerfile`:
    ```dockerfile
@@ -77,6 +93,8 @@ After the documents are approved:
 
 ## Checklist Before Completion
 - [ ] Briefing read, only gaps asked
+- [ ] Project language confirmed and saved in `.factory/setup.json` → `language`
+- [ ] UI language(s) of the app recorded in the PRD
 - [ ] `docs/PRD.md`, `docs/stack.md`, `docs/design-system.md` written and approved
 - [ ] `features/INDEX.md` with feature map, build order, next free ID
 - [ ] Stack scaffolded, test framework with one green test
@@ -85,10 +103,12 @@ After the documents are approved:
 - [ ] Backend checklist given to the user if there is a backend
 
 ## Handoff
-> "Projekt steht. Nächster Schritt: `/write-spec PROJ-1` für **[erstes Feature]**. Danach `/to-factory PROJ-1`."
+Tell the user, in their language: the project is set up; next step is `/write-spec PROJ-1` for **[first feature]**, then `/to-factory PROJ-1`.
 
 ## Git Commit
+Prefix in English, text in the project language, e.g.:
 ```
 chore: Projekt initialisiert (PRD, Stack, Design-System, Feature-Karte, Grundgerüst)
+chore: Project initialized (PRD, stack, design system, feature map, skeleton)
 ```
 Push to the default branch after the user confirms.

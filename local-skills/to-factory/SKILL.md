@@ -6,37 +6,50 @@ user-invocable: true
 disable-model-invocation: true
 ---
 
-# An die Software Factory übergeben
+# Hand Over to the Software Factory
 
-Übergibt eine fertige, vom Menschen abgenommene Spec an die Software Factory.
+Hands a finished spec, approved by the human, to the Software Factory.
 
-## Schritte
+**Language:** the issue is written in the project language (`.factory/setup.json` → `language`, `de` if missing). Talk to the user in the language they write in.
 
-1. **Spec finden:** `ls -d features/<PROJ-X>-*/` → darin muss `spec.md` liegen. Gibt es keine, abbrechen: „Für <PROJ-X> gibt es noch keine Spec. Erst `/write-spec`."
+## Steps
 
-2. **Prüfen, dass die Spec auf GitHub liegt.** Die Factory liest sie vom Standard-Branch, nicht von deinem Rechner.
-   - Standard-Branch: `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`
-   - `git fetch origin` und prüfen, dass `spec.md` auf `origin/<standard-branch>` identisch ist: `git diff --quiet origin/<standard-branch> -- features/<ordner>/spec.md`
-   - Ist sie lokal geändert, nicht committet oder nicht gepusht: dem Nutzer sagen, was fehlt, und fragen, ob du committen und pushen sollst. Nicht ungefragt pushen.
+1. **Find the spec:** `ls -d features/<PROJ-X>-*/` → it must contain `spec.md`. If there is none, stop: tell the user there is no spec for <PROJ-X> yet and to run `/write-spec` first.
 
-3. **Doppelte Übergabe vermeiden:** `gh issue list --label factory --state open --search "<PROJ-X> in:title" --json number,title`. Gibt es schon ein offenes Issue, dessen Link zeigen und abbrechen.
+2. **Check that the spec is on GitHub.** The factory reads it from the default branch, not from your machine.
+   - Default branch: `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`
+   - `git fetch origin` and check that `spec.md` is identical on `origin/<default-branch>`: `git diff --quiet origin/<default-branch> -- features/<folder>/spec.md`
+   - If it is changed locally, not committed or not pushed: tell the user what is missing and ask whether you should commit and push. Never push without asking.
 
-4. **Issue anlegen:**
-   - Titel: `<PROJ-X>: <Feature-Name aus der Spec>`
+3. **Avoid a duplicate handover:** `gh issue list --label factory --state open --search "<PROJ-X> in:title" --json number,title`. If there is already an open issue, show its link and stop.
+
+4. **Create the issue:**
+   - Title: `<PROJ-X>: <feature name from the spec>`
    - Label: `factory`
-   - Text:
+   - Body in the project language. The first line `Spec: …` stays exactly like this in every language, the factory looks for it:
      ```
-     Spec: features/<ordner>/spec.md
+     Spec: features/<folder>/spec.md
 
-     <ein Satz, worum es geht, aus den User Stories>
+     <one sentence on what it is about, from the user stories>
+
+     **<"Acceptance criteria (short)" in the project language>:**
+     - <ID>: …
+     - <ID>: …
+
+     _<"The spec is the contract. The factory builds against it and asks here if anything is unclear." in the project language>_
+     ```
+     Use the criterion IDs exactly as in the spec (`AK-1` in German specs, `AC-1` otherwise). German example:
+     ```
+     Spec: features/PROJ-3-genre-sortierung/spec.md
+
+     Nutzer können ihre Bibliothek nach Genre sortieren.
 
      **Akzeptanzkriterien (Kurzfassung):**
      - AK-1: …
-     - AK-2: …
 
      _Die Spec ist der Vertrag. Die Factory baut danach und meldet sich hier bei Fragen._
      ```
-   - Befehl: `gh issue create --label factory --title "…" --body-file <datei>`
-   - `features/INDEX.md` hier **nicht** ändern. Den Status pflegt ab jetzt die Factory in ihrem Branch.
+   - Command: `gh issue create --label factory --title "…" --body-file <file>`
+   - Do **not** change `features/INDEX.md` here. From now on the factory maintains the status in its branch.
 
-5. **Rückmeldung an den Nutzer:** Issue-Link und der Hinweis, dass die Factory es innerhalb einer Minute übernimmt. Fortschritt über die Labels am Issue bzw. das Board.
+5. **Report back to the user:** the issue link and that the factory picks it up within a minute. Progress is visible via the labels on the issue and the board.

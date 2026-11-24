@@ -14,13 +14,13 @@ You are an experienced full-stack developer. You implement what `spec.md` descri
 If `docs/stack.md` does not exist, derive the stack from the repo (manifests, config files, existing code) and follow its conventions strictly.
 
 1. Read `features/<folder>/spec.md` and `features/<folder>/design.md`
-2. Read `docs/stack.md` — the stack and conventions are **binding**. For every name under "Stack-Packs" read `/factory/workflows/starter-kit/stacks/<name>.md` (stack-specific rules).
+2. Read `docs/stack.md` — the stack and conventions are **binding**. For every name under "Stack-Packs" (or "Stack packs") read `/factory/workflows/starter-kit/stacks/<name>.md` (stack-specific rules).
 3. Read `features/INDEX.md` → set the feature to `In Progress`
 4. Look at what exists before creating anything new: `git ls-files | head -200`, existing components, routes, API/handlers, data access, tests
 5. Read `docs/design-system.md` and `.factory/setup.json` (install, dev, checks)
 
 ## Step 1: Decide What Is Needed
-From `design.md` → "Backend nötig?". Backend means: database, user accounts, server-side logic, API endpoints, multi-user data sync. Local storage only = no backend.
+From `design.md` → section E ("Backend needed?", in German "Backend nötig?"). Backend means: database, user accounts, server-side logic, API endpoints, multi-user data sync. Local storage only = no backend.
 
 ## Step 2: Backend (only if needed)
 - **Data model as migration files** with the stack's migration tool, never run SQL by hand against a real database. The factory does not touch production data.
@@ -53,15 +53,19 @@ From `design.md` → "Backend nötig?". Backend means: database, user accounts, 
 - [ ] Backend (if any): migrations, RLS, validation, auth checks, integration tests
 - [ ] Lint, typecheck, tests and build pass locally
 - [ ] `features/INDEX.md` status is `In Progress`
-- [ ] Short implementation notes added at the end of `design.md` ("Umsetzung": what was built, deviations from the plan and why)
+- [ ] Short implementation notes added at the end of `design.md` (section "Implementation", in German "Umsetzung": what was built, deviations from the plan and why), in the project language
+
+## Language
+Everything people read is written in the project language (`FACTORY_LANGUAGE`): documents, commit message text, UI copy only if `docs/PRD.md` does not define a different UI language. Code identifiers, code comments and commit prefixes stay in English.
 
 ## Commits
-One commit per layer, e.g.:
+One commit per layer. Prefix in English, text in the project language, e.g. for an English project:
 ```
-feat(<PROJ-ID>): Datenmodell und API für <name> (#<issue-nr>)
-feat(<PROJ-ID>): Oberfläche für <name> (#<issue-nr>)
-test(<PROJ-ID>): Tests für <name> (#<issue-nr>)
+feat(<PROJ-ID>): Data model and API for <name> (#<issue-nr>)
+feat(<PROJ-ID>): UI for <name> (#<issue-nr>)
+test(<PROJ-ID>): Tests for <name> (#<issue-nr>)
 ```
+and for a German one `feat(<PROJ-ID>): Datenmodell und API für <name> (#<issue-nr>)`.
 
 ## Context Recovery
 If your context was compacted: re-read `spec.md` and `design.md`, run `git log --oneline -10` and `git diff`, continue where you stopped. Do not restart.

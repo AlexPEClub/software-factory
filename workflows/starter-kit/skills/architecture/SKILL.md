@@ -27,7 +27,7 @@ If `docs/stack.md` does not exist, derive the stack from the repo (manifests, co
 - **Login / roles / third-party services:** Only if the spec requires them. If required but unclear → `factory-report question`.
 
 ## Write `features/<folder>/design.md`
-Use [template.md](template.md):
+Write it in the project language (`FACTORY_LANGUAGE`). Use the template for that language: [template.de.md](template.de.md) for German, [template.en.md](template.en.md) for English. For any other language use `template.en.md` and write its headings in the project language.
 - **A) Component structure** as a simple tree (which UI parts)
 - **B) Data model** in plain language (what is stored, where, limits)
 - **C) Tech decisions** with a WHY a PM understands
@@ -37,4 +37,4 @@ Use [template.md](template.md):
 
 ## After Saving
 - `features/INDEX.md` status → `Architected`
-- Commit: `docs(<PROJ-ID>): Architektur für <name> (#<issue-nr>)`
+- Commit: prefix in English, text in the project language, e.g. `docs(PROJ-3): Architecture for genre sorting (#12)` or `docs(PROJ-3): Architektur für Genre-Sortierung (#12)`

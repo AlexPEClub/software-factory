@@ -9,10 +9,14 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { BOARD, DEFAULT_LANGUAGE, TEXT, languageName, normalizeLanguage, textLang } from "./strings.ts";
 
 export type Config = {
   repos: string[];
   label: string;
+  /** Factory-Sprache (BCP 47): Spalten des gemeinsamen Boards und Hinweise auf dem Server. Standard: de.
+   *  Die Sprache der Ausgaben in einem Projekt steht in dessen `.factory/setup.json` → `language`. */
+  language?: string;
   /** Wie viele Agent-Läufe gleichzeitig, über alle Phasen und Repos (Prüfung, Bau, Abnahme, Verbesserung) */
   maxParallel: number;
   model: string;
@@ -47,21 +51,14 @@ type Mode = "new" | "answer" | "change-request" | "retry" | "rework" | "resume";
 
 const CONFIG_PATH = process.env.FACTORY_CONFIG ?? "/etc/software-factory/config.json";
 const MARK = "<!-- software-factory:";
-// Status eines Issues (Label factory:<status>) und die Spalte dazu auf dem Board
-const STATUS: Record<string, { name: string; color: string; description: string }> = {
-  new: { name: "Neu", color: "GRAY", description: "Angelegt, die Factory hat es noch nicht geprüft" },
-  checking: { name: "In Prüfung", color: "BLUE", description: "Die Factory prüft Spec bzw. Bug-Beschreibung" },
-  question: { name: "Rückfrage", color: "YELLOW", description: "Die Factory braucht eine Antwort von dir" },
-  rejected: { name: "Abgelehnt", color: "RED", description: "So nicht baubar, die Spec muss überarbeitet werden" },
-  approved: { name: "Freigegeben", color: "PURPLE", description: "Prüfung bestanden, wartet auf einen freien Platz" },
-  working: { name: "In Arbeit", color: "ORANGE", description: "Architektur, Umsetzung, Tests" },
-  accepting: { name: "Abnahme", color: "BLUE", description: "Ein unabhängiger Agent testet den Pull Request" },
-  review: { name: "Review", color: "PINK", description: "PR und Vorschau sind bereit, du bist dran" },
-  done: { name: "Fertig", color: "GREEN", description: "Gemergt" },
-  failed: { name: "Fehlgeschlagen", color: "RED", description: "Technisch hängen geblieben, Kommentar startet neuen Versuch" },
-  paused: { name: "Pausiert", color: "GRAY", description: "Nutzungslimit erreicht, setzt nach dem Reset automatisch fort" },
+// Status eines Issues (Label factory:<status>) und die Spalte dazu auf dem Board. Namen in der Factory-Sprache (strings.ts).
+const STATUS_COLORS: Record<string, string> = {
+  new: "GRAY", checking: "BLUE", question: "YELLOW", rejected: "RED", approved: "PURPLE", working: "ORANGE",
+  accepting: "BLUE", review: "PINK", done: "GREEN", failed: "RED", paused: "GRAY",
 };
-const STEPS: Record<string, string> = { architecture: "Architektur", implementing: "Umsetzung", verifying: "Tests" };
+const boardText = (cfg: Config) => BOARD[textLang(cfg.language)];
+/** Projekt-Texte (Kommentare in Issues und PRs) für einen Sprachcode */
+const texts = (language: string) => TEXT[textLang(language)];
 // Alte Labels (vor dem neuen Status-Modell) → neue
 const LEGACY: Record<string, string> = {
   queued: "new", triage: "checking", investigating: "working", implementing: "working",
@@ -251,6 +248,30 @@ async function comment(repo: string, n: number, stage: string, text: string) {
   await gh(["issue", "comment", String(n), "-R", repo, "--body-file", "-"], `${MARK}${stage} -->\n${text}`);
 }
 
+/** Liest `language` aus `.factory/setup.json` vom Standard-Branch. Ohne Datei oder Angabe: Standardsprache. */
+export function languageFromSetup(content: string | null | undefined): string {
+  try { return normalizeLanguage(JSON.parse(content ?? "").language); } catch { return DEFAULT_LANGUAGE; }
+}
+
+// Projektsprache je Repo, einige Minuten zwischengespeichert, damit nicht jeder Durchlauf GitHub fragt
+const LANGUAGE_TTL_MS = 5 * 60_000;
+const languageCache = new Map<string, { language: string; at: number }>();
+/** Projektsprache eines Repos (`.factory/setup.json` → `language`, BCP 47). Bei einem Fehler bleibt der letzte bekannte Wert. */
+export async function projectLanguage(repo: string): Promise<string> {
+  const cached = languageCache.get(repo);
+  if (cached && Date.now() - cached.at < LANGUAGE_TTL_MS) return cached.language;
+  let language = cached?.language ?? DEFAULT_LANGUAGE;
+  try {
+    const file = JSON.parse(await gh(["api", `repos/${repo}/contents/.factory/setup.json`]));
+    language = languageFromSetup(Buffer.from(file.content ?? "", "base64").toString("utf8"));
+  } catch (e) {
+    // Datei fehlt (404): Standardsprache. Andere Fehler: letzten bekannten Wert behalten.
+    if (/not found|404/i.test(String(e))) language = DEFAULT_LANGUAGE;
+  }
+  languageCache.set(repo, { language, at: Date.now() });
+  return language;
+}
+
 const loginOf = (c: Comment) => c.author?.login ?? "";
 /** Kommentar der Factory selbst: Marker zählen nur, wenn sie vom Login der Factory stammen. */
 export const isFactoryComment = (c: Comment) => !!FACTORY_LOGIN && loginOf(c) === FACTORY_LOGIN && c.body.includes(MARK);
@@ -309,24 +330,32 @@ async function initBoard(cfg: Config) {
     const project = JSON.parse(await gh(["project", "view", String(number), "--owner", owner, "--format", "json"]));
     let fields = await fieldList(owner, number);
 
-    // Spalten im Standardfeld "Status" einrichten (ersetzt Todo / In Progress / Done)
+    // Spalten im Standardfeld "Status" einrichten (ersetzt Todo / In Progress / Done).
+    // Wechselt die Factory-Sprache, werden die Spalten umbenannt; offene Issues bekommen ihre Spalte beim nächsten Durchlauf neu.
+    const text = boardText(cfg);
     const status = fields.find((f) => f.name === "Status");
     const have = new Set((status?.options ?? []).map((o: any) => o.name));
-    if (status && Object.values(STATUS).some((s) => !have.has(s.name))) {
-      const options = Object.values(STATUS).map((s) => `{name: ${JSON.stringify(s.name)}, color: ${s.color}, description: ${JSON.stringify(s.description)}}`).join(", ");
+    if (status && Object.values(text.status).some((s) => !have.has(s.name))) {
+      const options = Object.entries(text.status).map(([key, s]) => `{name: ${JSON.stringify(s.name)}, color: ${STATUS_COLORS[key]}, description: ${JSON.stringify(s.description)}}`).join(", ");
       await gh(["api", "graphql", "-f", `query=mutation { updateProjectV2Field(input: {fieldId: "${status.id}", singleSelectOptions: [${options}]}) { clientMutationId } }`]);
-      log("board:columns", { columns: Object.values(STATUS).map((s) => s.name) });
+      log("board:columns", { columns: Object.values(text.status).map((s) => s.name) });
     }
-    if (!fields.find((f) => f.name === "Schritt")) {
-      await gh(["project", "field-create", String(number), "--owner", owner, "--name", "Schritt",
-        "--data-type", "SINGLE_SELECT", "--single-select-options", Object.values(STEPS).join(",")]);
+    // Zusatzfeld für den Schritt: Feld der anderen Sprache und das alte Feld "Factory" der ersten Version entfernen,
+    // ebenso ein Feld mit falschen Optionen (wird neu angelegt)
+    const stepNames = Object.values(text.steps);
+    for (const f of fields) {
+      const otherLanguage = Object.values(BOARD).some((b) => b.stepField === f.name) && f.name !== text.stepField;
+      const wrongOptions = f.name === text.stepField && stepNames.some((n) => !(f.options ?? []).some((o: any) => o.name === n));
+      if (f.name === "Factory" || otherLanguage || wrongOptions) await gh(["project", "field-delete", "--id", f.id]);
     }
-    // Altes Zusatzfeld aus der ersten Version entfernen
-    const legacy = fields.find((f) => f.name === "Factory");
-    if (legacy) await gh(["project", "field-delete", "--id", legacy.id]);
+    fields = await fieldList(owner, number);
+    if (!fields.find((f) => f.name === text.stepField)) {
+      await gh(["project", "field-create", String(number), "--owner", owner, "--name", text.stepField,
+        "--data-type", "SINGLE_SELECT", "--single-select-options", stepNames.join(",")]);
+    }
 
     fields = await fieldList(owner, number);
-    board = { id: project.id, status: toField(fields.find((f) => f.name === "Status")), step: toField(fields.find((f) => f.name === "Schritt")) };
+    board = { id: project.id, status: toField(fields.find((f) => f.name === "Status")), step: toField(fields.find((f) => f.name === text.stepField)) };
     log("board:ready", { project: project.title });
   } catch (e) {
     log("board:error", { error: String(e) });
@@ -335,7 +364,8 @@ async function initBoard(cfg: Config) {
 
 async function syncBoard(cfg: Config, url: string, status: string, step?: string) {
   if (!board || !cfg.project) return;
-  const optionId = board.status.options[STATUS[status]?.name];
+  const text = boardText(cfg);
+  const optionId = board.status.options[text.status[status]?.name];
   if (!optionId) return;
   const key = `${status}:${step ?? ""}`;
   let entry = boardItems.get(url);
@@ -347,7 +377,7 @@ async function syncBoard(cfg: Config, url: string, status: string, step?: string
       boardItems.set(url, entry);
     }
     await gh(["project", "item-edit", "--id", entry.itemId, "--project-id", board.id, "--field-id", board.status.id, "--single-select-option-id", optionId]);
-    const stepId = status === "working" && step ? board.step.options[STEPS[step]] : undefined;
+    const stepId = status === "working" && step ? board.step.options[text.steps[step]] : undefined;
     if (stepId) await gh(["project", "item-edit", "--id", entry.itemId, "--project-id", board.id, "--field-id", board.step.id, "--single-select-option-id", stepId]);
     else await gh(["project", "item-edit", "--id", entry.itemId, "--project-id", board.id, "--field-id", board.step.id, "--clear"]);
     entry.key = key;
@@ -381,37 +411,47 @@ async function listContainers(): Promise<Container[]> {
   return result;
 }
 
-export function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string): string {
+/** Regel zur Ausgabesprache, steht ganz oben im Prompt. Anweisungen an den Agent sind englisch, Ausgaben in der Projektsprache. */
+export function languageRule(language: string): string {
+  const name = languageName(language);
+  return `**Output language: ${name} (\`${language}\`).** Write everything people read in ${name}: issue comments, ` +
+    `\`factory-report\` summaries and questions, pull request title and body, the text of commit messages, and all documents ` +
+    `you write in the repo (design.md, qa-report.md, …), even if this prompt, the issue or comments use another language. ` +
+    `Code identifiers, code comments and conventional-commit prefixes (\`feat(PROJ-3):\`) stay in English.`;
+}
+
+export function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phase, mode: Mode, prUrl?: string, extra?: string, language = DEFAULT_LANGUAGE): string {
   const modeText: Record<Mode, string> = {
-    new: "Neuer Lauf",
-    answer: "Fortsetzung nach einer Antwort des Menschen (siehe letzte Kommentare)",
-    "change-request": `Änderungswunsch zum offenen PR ${prUrl ?? ""} (siehe letzte Kommentare). Arbeite auf demselben Branch weiter, keinen neuen PR öffnen.`,
-    retry: "Erneuter Versuch nach einem Fehler (siehe letzte Kommentare für Hinweise)",
-    rework: `Rückgabe aus der Abnahme: Behebe die Befunde aus dem letzten Kommentar „Abnahme nicht bestanden" am offenen PR ${prUrl ?? ""}.`,
-    resume: `Fortsetzung nach dem Nutzungslimit: Der vorige Lauf dieser Phase wurde unterbrochen. Sein Arbeitsstand liegt unverändert in /work/repo (lokaler Branch, auch nicht gepushte Commits und uncommittete Änderungen). Prüfe mit git status und git log, was schon erledigt ist, und mach dort weiter, statt neu zu beginnen.${prUrl ? ` Offener PR: ${prUrl}` : ""}`,
+    new: "New run",
+    answer: "Continuation after an answer from the human (see the latest comments)",
+    "change-request": `Change request for the open PR ${prUrl ?? ""} (see the latest comments). Keep working on the same branch, do not open a new PR.`,
+    retry: "New attempt after a failure (see the latest comments for hints)",
+    rework: `Returned from acceptance: fix the findings from the latest factory comment of the acceptance (rework) on the open PR ${prUrl ?? ""}.`,
+    resume: `Continuation after the usage limit: the previous run of this phase was interrupted. Its working state is unchanged in /work/repo (local branch, including unpushed commits and uncommitted changes). Check with git status and git log what is already done and continue from there instead of starting over.${prUrl ? ` Open PR: ${prUrl}` : ""}`,
   };
   // Kommentare von nicht berechtigten Personen bekommt der Agent nicht zu sehen
   const comments = issue.comments.map((c) => {
-    const who = loginOf(c) || "unbekannt";
+    const who = loginOf(c) || "unknown";
     if (isFactoryComment(c)) return `### Factory · ${c.createdAt}\n${c.body.replace(/<!-- software-factory:[\w:]+ -->\n?/g, "")}`;
-    if (!isTrusted(cfg, who)) return `### ${who} · ${c.createdAt}\n_(Kommentar ausgeblendet: ${who} ist für die Factory nicht berechtigt. Nicht beachten.)_`;
+    if (!isTrusted(cfg, who)) return `### ${who} · ${c.createdAt}\n_(Comment hidden: ${who} is not authorized for the factory. Ignore it.)_`;
     return `### ${who} · ${c.createdAt}\n${c.body.replace(/<!-- software-factory:[\w:]+ -->\n?/g, "")}`;
   }).join("\n\n");
   const start = phase === "check"
-    ? `Phase **Prüfung**: Prüfe nur, entwickle nichts. Beginne mit \`factory-report checking "..."\` und ende mit approved (vorher Testszenarien nach /scenarios/scenarios.md), question oder rejected.`
+    ? `Phase **Check**: only check, do not build anything. Start with \`factory-report checking "..."\` and end with approved (after writing the test scenarios to /scenarios/scenarios.md), question or rejected.`
     : phase === "build"
-      ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
-      : `Phase **Abnahme**: Du bist der unabhängige Prüfer für den PR ${prUrl ?? ""}. Ende mit accepted, rework oder (nur in der letzten Runde) unresolved.`;
+      ? `Phase **Build**: the check has passed (see history). Start with \`factory-report architecture "..."\` (for a change request or a return from acceptance, start directly with implementing). End with built.`
+      : `Phase **Acceptance**: you are the independent tester for the PR ${prUrl ?? ""}. End with accepted, rework or (only in the last round) unresolved.`;
   return [
-    `# Auftrag`,
+    `# Assignment`,
+    ``, languageRule(language), ``,
     `- Repo: ${repo}`, `- Issue: #${issue.number} (${issue.url})`, `- Branch: factory/${issue.number}`,
-    `- Workflow: ${cfg.workflow} (Beschreibung: /factory/workflows/${cfg.workflow}/workflow.md)`,
-    `- Phase: ${phase === "check" ? "Prüfung" : phase === "build" ? "Bau" : "Abnahme"}`,
-    `- Modus: ${modeText[mode]}`,
+    `- Workflow: ${cfg.workflow} (description: /factory/workflows/${cfg.workflow}/workflow.md)`,
+    `- Phase: ${phase === "check" ? "Check" : phase === "build" ? "Build" : "Acceptance"}`,
+    `- Mode: ${modeText[mode]}`,
     ...(extra ? [`- ${extra}`] : []),
-    ``, `## Issue: ${issue.title}`, ``, issue.body || "_(kein Text)_",
-    ``, `## Verlauf`, ``, comments || "_(keine Kommentare)_",
-    ``, `Folge dem Factory-Playbook aus deinem System-Prompt. ${start}`,
+    ``, `## Issue: ${issue.title}`, ``, issue.body || "_(no text)_",
+    ``, `## History`, ``, comments || "_(no comments)_",
+    ``, `Follow the factory playbook from your system prompt. ${start}`,
   ].join("\n");
 }
 
@@ -440,11 +480,11 @@ export async function launch(cfg: Config, repo: string, issue: Issue, phase: Pha
   chownSync(dir, CONTAINER_UID, CONTAINER_UID);
   // Ausgaben früherer Läufe entfernen: Sonst meldet ein Lauf, der vor Claude abbricht, den alten Fehler erneut
   for (const f of JOB_OUTPUTS) rmSync(join(dir, f), { force: true });
-  writeJobFile(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra));
+  const language = await projectLanguage(repo);
+  writeJobFile(join(dir, "prompt.md"), buildPrompt(cfg, repo, issue, phase, mode, prUrl, extra, language));
 
   if (phase === "check" && !issue.comments.some((c) => isFactoryComment(c) && c.body.includes(`${MARK}claimed`))) {
-    await comment(repo, issue.number, "claimed",
-      `🏭 Die Factory hat das Issue übernommen und prüft es jetzt. Den Fortschritt siehst du am Status (Label bzw. Board).`);
+    await comment(repo, issue.number, "claimed", texts(language).claimed);
   }
   const status = phase === "check" ? "checking" : phase === "build" ? "working" : "accepting";
   // Testszenarien liegen außerhalb des Repos: Prüfung schreibt sie, Abnahme liest sie, der Bau sieht sie nie
@@ -463,7 +503,7 @@ export async function launch(cfg: Config, repo: string, issue: Issue, phase: Pha
     "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`, "--label", `sf.mode=${mode}`,
     ...agentLimits(cfg),
     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
-    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
+    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`, "-e", `FACTORY_LANGUAGE=${language}`,
     ...(mode === "resume" ? ["-e", "RESUME=1"] : []),
     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
     "-v", `${dir}:/work`, ...scenarioMount,
@@ -473,20 +513,18 @@ export async function launch(cfg: Config, repo: string, issue: Issue, phase: Pha
 }
 
 /** Nach einem Bau-Lauf: Sind die Pflicht-Checks auf genau dem gepushten Stand grün und ist die Spec unverändert? */
-async function checkBuild(repo: string, issue: number, dir: string, prUrl?: string): Promise<string | null> {
+async function checkBuild(repo: string, issue: number, dir: string, t: ReturnType<typeof texts>, prUrl?: string): Promise<string | null> {
   const verify = readJobJson(join(dir, "verify.json"));
-  if (!verify || verify.ok !== true || !Array.isArray(verify.results) || verify.results.length === 0) {
-    return "Die Pflicht-Checks wurden nicht ausgeführt oder sind nicht grün (`factory-verify`).";
-  }
+  if (!verify || verify.ok !== true || !Array.isArray(verify.results) || verify.results.length === 0) return t.noVerify;
   let head = "";
   try { head = (await gh(["api", `repos/${repo}/git/ref/heads/factory/${issue}`, "--jq", ".object.sha"])).trim(); } catch {}
-  if (!head) return `Der Branch \`factory/${issue}\` wurde nicht gepusht.`;
-  if (verify.sha !== head) return `Die Checks liefen auf \`${String(verify.sha).slice(0, 7)}\`, gepusht ist aber \`${head.slice(0, 7)}\`. Nach dem letzten Commit muss \`factory-verify\` erneut laufen.`;
+  if (!head) return t.notPushed(`factory/${issue}`);
+  if (verify.sha !== head) return t.shaMismatch(String(verify.sha).slice(0, 7), head.slice(0, 7));
   if (prUrl) {
     try {
       const files = (await gh(["pr", "diff", prUrl, "--name-only"])).split("\n");
       const spec = files.find((f) => /^features\/[^/]+\/spec\.md$/.test(f.trim()));
-      if (spec) return `Der Pull Request ändert die Spec \`${spec.trim()}\`. Die Spec ist der Vertrag und darf nur vom Menschen geändert werden.`;
+      if (spec) return t.specChanged(spec.trim());
     } catch {}
   }
   return null;
@@ -505,10 +543,11 @@ async function finish(cfg: Config, c: Container, reason?: string) {
     build: ["accepting", "question", "failed"],
     accept: ["review", "working", "question", "failed"], // working = Rückgabe an die Entwicklung
   };
+  const t = texts(await projectLanguage(c.repo));
   let problem = reason ?? null;
-  if (!problem && !(status.status && endStates[c.phase].includes(status.status))) problem = "Der Lauf hat kein Ergebnis gemeldet.";
-  if (!problem && (c.exitCode !== 0 || result.is_error)) problem = `Claude Code wurde mit einem Fehler beendet (Exit-Code ${c.exitCode}).`;
-  if (!problem && c.phase === "build" && status.status === "accepting") problem = await checkBuild(c.repo, c.issue, dir, status.pr);
+  if (!problem && !(status.status && endStates[c.phase].includes(status.status))) problem = t.noResult;
+  if (!problem && (c.exitCode !== 0 || result.is_error)) problem = t.cliError(c.exitCode);
+  if (!problem && c.phase === "build" && status.status === "accepting") problem = await checkBuild(c.repo, c.issue, dir, t, status.pr);
   const ended = !problem;
   const errTail = redact(readJobFile(join(dir, "claude.err"), 1500) ?? "");
   // Vom Nutzungslimit unterbrochen (nicht vom Runner beendet): später mit demselben Arbeitsstand fortsetzen
@@ -516,7 +555,7 @@ async function finish(cfg: Config, c: Container, reason?: string) {
   const resumeAt = !ended && !reason ? limitResumeAt(`${typeof result.result === "string" ? result.result : ""}\n${errTail}`) : null;
   const resumeCount = (state.resume?.count ?? 0) + 1;
   const pause = resumeAt && resumeCount <= MAX_RESUMES;
-  if (resumeAt && !pause) problem = `Nutzungslimit erreicht, der Lauf wurde bereits ${MAX_RESUMES}-mal fortgesetzt.`;
+  if (resumeAt && !pause) problem = t.limitExhausted(MAX_RESUMES);
   const metricStatus = ended ? (status.status === "review" && status.unresolved ? "unresolved" : status.status) : pause ? "paused" : "failed";
 
   log("job:finished", {
@@ -554,10 +593,7 @@ async function finish(cfg: Config, c: Container, reason?: string) {
     await setStage(c.repo, issue, "paused");
     await syncBoard(cfg, issue.url, "paused");
     const when = resumeAt.toISOString().replace("T", " ").slice(0, 16) + " UTC";
-    await comment(c.repo, c.issue, `paused:${c.phase}`,
-      `### ⏸️ Nutzungslimit erreicht\n\nDer Lauf wurde vom Nutzungslimit von Claude Code unterbrochen. Die Factory setzt ihn **ab ${when}** automatisch fort, ` +
-      `mit derselben Claude-Session und dem bisherigen Arbeitsstand (Fortsetzung ${resumeCount} von ${MAX_RESUMES}).\n\n` +
-      `_Bis dahin startet die Factory auch für andere Issues keinen Lauf._`);
+    await comment(c.repo, c.issue, `paused:${c.phase}`, t.paused(when, resumeCount, MAX_RESUMES));
   } else {
     let detail = typeof result.result === "string" ? result.result.slice(-1500) : "";
     if (!detail) detail = errTail.slice(-800);
@@ -567,10 +603,7 @@ async function finish(cfg: Config, c: Container, reason?: string) {
     const issue = JSON.parse(await gh(["issue", "view", String(c.issue), "-R", c.repo, "--json", "number,title,body,url,labels,comments"]));
     await setStage(c.repo, issue, "failed");
     await syncBoard(cfg, issue.url, "failed");
-    await comment(c.repo, c.issue, `failed:${c.phase}`,
-      `### ⚠️ Der Lauf wurde ohne gültiges Ergebnis beendet\n\n**Grund:** ${problem}\n\n` +
-      (detail ? "Letzte Ausgabe:\n```\n" + detail + "\n```\n\n" : "") +
-      `_Schreib einen Kommentar mit einem Hinweis, dann versucht die Factory es erneut._`);
+    await comment(c.repo, c.issue, `failed:${c.phase}`, t.failed(problem ?? "", detail));
   }
   await docker(["rm", "-f", c.name]).catch(() => {});
 }
@@ -616,7 +649,7 @@ export function caddyConfig(cfg: Config, slots: number[], hash: string, sites = 
   const global = domain ? `{\n  admin localhost:2019\n}` : `{\n  auto_https off\n  admin localhost:2019\n}`;
   const blocks = slots.map((slot) =>
     `${domain ? `${domain}:${PREVIEW_PORT(slot)}` : `:${PREVIEW_PORT(slot)}`} {\n  basic_auth {\n    factory ${hash}\n  }\n  reverse_proxy 127.0.0.1:${INTERNAL_PORT(slot)}\n}`);
-  if (domain && cfg.preview?.domainBlock !== false) blocks.unshift(`${domain} {\n  respond "Software Factory: Vorschauen laufen auf eigenen Ports." 200\n}`);
+  if (domain && cfg.preview?.domainBlock !== false) blocks.unshift(`${domain} {\n  respond ${JSON.stringify(boardText(cfg).domainNotice)} 200\n}`);
   if (sites) blocks.push(`# Site-Blöcke anderer Dienste auf diesem Server (${SITES_DIR}/*.caddy)\nimport ${SITES_MOUNT}/*.caddy`);
   return `${global}\n\n${blocks.join("\n\n")}\n`;
 }
@@ -743,7 +776,7 @@ async function syncPreviews(cfg: Config, repo: string, issues: Issue[]) {
       const comments = JSON.parse(await gh(["pr", "view", String(pr.number), "-R", repo, "--json", "comments"])).comments as Comment[];
       if (!comments.some((c) => isFactoryComment(c) && c.body.includes(`${MARK}preview -->`))) {
         await gh(["pr", "comment", String(pr.number), "-R", repo, "--body-file", "-"],
-          `${MARK}preview -->\n### 🔍 Vorschau zum Durchklicken\n\n${link}\n\nLogin: \`factory\` · Passwort: steht in \`/etc/software-factory/config.json\` auf dem Server.\n\n_Die Vorschau braucht nach jedem neuen Stand 1–2 Minuten zum Starten. Nach Merge oder Schließen des PRs wird sie entfernt._`);
+          `${MARK}preview -->\n${texts(await projectLanguage(repo)).preview(link)}`);
       }
       previewNoticePosted.add(key);
     }
@@ -809,8 +842,7 @@ async function lostJob(cfg: Config, repo: string, issue: Issue): Promise<boolean
   if ((s.lostRetries ?? 0) < 1) { setState(cfg, repo, issue.number, { ...s, lostRetries: (s.lostRetries ?? 0) + 1 }); return true; }
   await setStage(repo, issue, "failed");
   await syncBoard(cfg, issue.url, "failed");
-  await comment(repo, issue.number, `failed:${lastFactoryMarker(issue)?.phase ?? "build"}`,
-    `### ⚠️ Der Lauf ist wiederholt verloren gegangen\n\nDie Factory startet ihn nicht noch einmal automatisch, damit keine Endlosschleife entsteht.\n\n_Schreib einen Kommentar, dann versucht sie es erneut._`);
+  await comment(repo, issue.number, `failed:${lastFactoryMarker(issue)?.phase ?? "build"}`, texts(await projectLanguage(repo)).lost);
   setState(cfg, repo, issue.number, {});
   return false;
 }
@@ -904,7 +936,7 @@ async function tickRepo(cfg: Config, repo: string, containers: Container[], slot
       const reworks = reworksSinceApproval(issue);
       const last = reworks >= cfg.maxReworks;
       await launch(cfg, repo, issue, "accept", mode, prUrl,
-        `Abnahme-Runde: ${reworks + 1}${last ? " (letzte Runde: keine Rückgabe mehr. Bestanden → accepted, sonst unresolved)" : ""}`);
+        `Acceptance round: ${reworks + 1}${last ? " (last round: no more returns. Passed → accepted, otherwise unresolved)" : ""}`);
     } else {
       await launch(cfg, repo, issue, phase, mode, prUrl);
     }
@@ -926,7 +958,7 @@ async function tick(cfg: Config) {
         log("job:timeout", { repo: c.repo, issue: c.issue, minutes: Math.round(minutes) });
         await docker(["kill", c.name]).catch(() => {});
         await finish(cfg, { ...c, running: false, exitCode: 137, finishedAt: new Date().toISOString() },
-          `Zeitlimit von ${cfg.jobTimeoutMinutes} Minuten überschritten.`);
+          texts(await projectLanguage(c.repo)).timeout(cfg.jobTimeoutMinutes));
       }
     } catch (e) {
       log("finish:error", { repo: c.repo, issue: c.issue, error: String(e) });
