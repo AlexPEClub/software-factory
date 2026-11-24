@@ -1,8 +1,6 @@
-# Software Factory
+# Software Factory (Supports DE and EN, main documentation currently in German)
 
 Eine Software Factory mit Claude Code, die rund um die Uhr auf einem eigenen Server läuft.
-
-> 🖥️ **Server:** Die Factory läuft auf einem Linux-VPS, bei mir mit einem **Hostinger KVM 4** (4 CPU-Kerne, 16 GB RAM) mit der Vorlage „Ubuntu 26.04 LTS“.
 
 **Du entscheidest, was gebaut wird. Die Factory baut es.**
 
