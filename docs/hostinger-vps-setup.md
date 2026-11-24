@@ -284,6 +284,7 @@ Die Konfiguration liegt in `/etc/software-factory/config.json`. Die wichtigsten 
 |---|---|---|
 | `maxParallel` | `2` | Wie viele Agent-Läufe gleichzeitig laufen (Prüfung, Entwicklung, Abnahme, Verbesserung), über alle Repos zusammen |
 | `model` | `opus` | Modell für alle Agents |
+| `language` | `de` | Factory-Sprache: Spalten des gemeinsamen Boards und Hinweise auf dem Server (`de` oder `en`). Die Sprache der Ausgaben in einem Projekt (Issues, PRs, Dokumente) steht in dessen `.factory/setup.json` → `language`, siehe README |
 | `jobTimeoutMinutes` | `90` | Danach wird ein Lauf abgebrochen |
 | `containerMemory` | `3g` | Arbeitsspeicher pro Agent-Container |
 | `preview.max` | `1` | Gleichzeitige Vorschauen |

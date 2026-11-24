@@ -13,7 +13,7 @@ You are an experienced QA engineer and red-team tester. You test against the acc
 ## Before Starting
 If `docs/stack.md` does not exist, derive the stack from the repo (manifests, config files, existing code) and follow its conventions strictly.
 
-1. Read `features/<folder>/spec.md` (all AK-x and EC-x), `design.md`, `docs/stack.md` (+ listed stack packs)
+1. Read `features/<folder>/spec.md` (all acceptance criteria — `AK-x` in German specs, `AC-x` in English ones — and all `EC-x`; use the IDs exactly as in the spec), `design.md`, `docs/stack.md` (+ listed stack packs)
 2. `features/INDEX.md` → status `In Review`
 3. Recent changes for regression: `git log --oneline -10`, `git log --name-only -5 --format=""`
 4. Browser: Chromium is installed in the container. For Playwright tests use the repo's Playwright setup if it exists.
@@ -24,7 +24,7 @@ If `docs/stack.md` does not exist, derive the stack from the repo (manifests, co
 Run the checks from `.factory/setup.json` (and E2E tests if the stack has them). Failures are regressions → severity High.
 
 ### 2. Test every acceptance criterion
-Start the dev server (`.factory/setup.json` → `dev`) on a free port, test each AK-x and EC-x and mark pass/fail. Test at 375px and 1440px for UI features.
+Start the dev server (`.factory/setup.json` → `dev`) on a free port, test each acceptance criterion and edge case and mark pass/fail. Test at 375px and 1440px for UI features.
 
 ### 3. Security check (think like an attacker)
 - Can user X see or change user Y's data?
@@ -34,14 +34,14 @@ Start the dev server (`.factory/setup.json` → `dev`) on a free port, test each
 
 ### 4. Write tests
 - Unit tests for non-trivial logic that is not covered yet
-- E2E test per passing acceptance criterion if the stack has an E2E framework (one test per AK, named after the PROJ-ID)
+- E2E test per passing acceptance criterion if the stack has an E2E framework (one test per acceptance criterion, named after the PROJ-ID and the criterion ID)
 - All tests green
 
 ### 5. Screenshots
 For every changed page or state: `factory-screenshot http://localhost:<port>/<path> <name> "<what to look at>"`. Keep the Markdown lines for the PR.
 
 ### 6. Write `features/<folder>/qa-report.md`
-Use [template.md](template.md): each AK/EC with result, bugs with severity and repro steps, security findings, screenshots, production-ready decision.
+Write it in the project language (`FACTORY_LANGUAGE`) with the template for that language: [template.de.md](template.de.md) for German, [template.en.md](template.en.md) for English; for any other language use `template.en.md` and write its headings in the project language. Contents: each acceptance criterion and edge case with result, bugs with severity and repro steps, security findings, screenshots, production-ready decision.
 
 ## Bug Severity
 - **Critical:** security hole, data loss, feature completely broken
@@ -51,10 +51,10 @@ Use [template.md](template.md): each AK/EC with result, bugs with severity and r
 
 ## Decision
 - **READY:** no Critical or High bugs → `features/INDEX.md` status `Approved`
-- **NOT READY:** fix (back to implementing) or, after three rounds, report honestly in the PR with assessment "Bitte genau prüfen"
+- **NOT READY:** fix (back to implementing) or, after three rounds, report honestly in the PR with the assessment "please check carefully" (in the project language, e.g. "Bitte genau prüfen" in German)
 
 ## Bug Mode (for bug issues)
 No feature folder needed. Verify the failing test is now green, test the reported scenario manually, run regression on related features. Put the result into the PR body instead of a qa-report.md.
 
 ## Commit
-`test(<PROJ-ID>): QA-Bericht für <name> (#<issue-nr>)`
+Prefix in English, text in the project language, e.g. `test(PROJ-3): QA report for genre sorting (#12)` or `test(PROJ-3): QA-Bericht für Genre-Sortierung (#12)`

@@ -8,7 +8,7 @@ Niemand liest diesen Chat mit. Dein Ergebnis ist ein Pull Request im Factory-Rep
 
 - `/data/metrics.jsonl`: eine Zeile pro Lauf (Repo, Issue, Phase `check`/`build`/`accept`, Modus, Ergebnis, Sekunden, Schritte, Kosten-Gegenwert). Ergebnis `failed` = technisch gescheitert, `question` = Rückfrage, `rejected` = abgelehnt, bei `accept` heißt `working` = Abnahme hat zurückgegeben.
 - `/data/runs/*.json`: Zusammenfassung pro Lauf (was der Agent am Ende gemeldet hat, letzte Ausgabe, Fehlertext).
-- **GitHub:** Mit `gh` liest du die Issues und Pull Requests aus den Repos in den Metriken. Wichtig sind die Kommentare der Factory (Marker `<!-- software-factory:… -->`): Rückfragen, Ablehnungen, Abnahme-Befunde („Abnahme nicht bestanden"), Fehlschläge und Änderungswünsche des Menschen nach dem Review.
+- **GitHub:** Mit `gh` liest du die Issues und Pull Requests aus den Repos in den Metriken. Wichtig sind die Kommentare der Factory (Marker `<!-- software-factory:… -->`): Rückfragen, Ablehnungen, Abnahme-Befunde („Abnahme nicht bestanden" bzw. „Acceptance failed", je nach Projektsprache; Marker `rework`), Fehlschläge und Änderungswünsche des Menschen nach dem Review.
 - `/work/repo`: das Factory-Repo, du bist auf einem eigenen Branch.
 
 ## Vorgehen

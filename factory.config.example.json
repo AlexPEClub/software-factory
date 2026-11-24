@@ -3,6 +3,7 @@
     "DEIN-GITHUB-NAME/dein-repo"
   ],
   "label": "factory",
+  "language": "de",
   "maxParallel": 2,
   "model": "opus",
   "workflow": "starter-kit",

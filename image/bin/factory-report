@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Meldet den Stand eines Factory-Jobs an GitHub (Status-Label + bei Bedarf Kommentar).
+# Reports the state of a factory job to GitHub (status label and, where needed, a comment).
+# Comments are written in the project language (FACTORY_LANGUAGE, BCP 47): German for de-*, English otherwise.
 #
-# Phase "Prüfung":  factory-report checking  "<was du prüfst>"
-#                   factory-report approved  "<Ergebnis der Prüfung>"
-#                   factory-report question  "<was du herausgefunden hast>" --question "<Frage mit Optionen>"
-#                   factory-report rejected  "<Grund>" --question "<was der Mensch tun muss>"
-# Phase "Bau":      factory-report architecture | implementing | verifying  "<was du tust>"
-#                   factory-report built     "<Zusammenfassung>" --pr <url> [--body-file <datei>]   (PR offen, Abnahme folgt)
-#                   factory-report question  "..." --question "..."
-# Phase "Abnahme":  factory-report accepted  "<Zusammenfassung>" --pr <url> --body-file <abnahmebericht>
-#                   factory-report rework    "<Zusammenfassung der Befunde>" --body-file <befunde>
-#                   factory-report unresolved "<Zusammenfassung>" --pr <url> --body-file <bericht>   (nur letzte Runde: nicht bestanden, Mensch entscheidet)
-# Immer:            factory-report failed    "<Grund>"
+# Phase "check":      factory-report checking  "<what you are checking>"
+#                     factory-report approved  "<result of the check>"
+#                     factory-report question  "<what you found>" --question "<question with options>"
+#                     factory-report rejected  "<reason>" --question "<what the human has to do>"
+# Phase "build":      factory-report architecture | implementing | verifying  "<what you are doing>"
+#                     factory-report built     "<summary>" --pr <url> [--body-file <file>]   (PR open, acceptance follows)
+#                     factory-report question  "..." --question "..."
+# Phase "acceptance": factory-report accepted  "<summary>" --pr <url> --body-file <acceptance report>
+#                     factory-report rework    "<summary of findings>" --body-file <findings>
+#                     factory-report unresolved "<summary>" --pr <url> --body-file <report>   (last round only: failed, the human decides)
+# Always:             factory-report failed    "<reason>"
 set -euo pipefail
 
 STAGE="${1:-}"; SUMMARY="${2:-}"
@@ -22,7 +23,7 @@ while [ $# -gt 0 ]; do
     --question) QUESTION="$2"; shift 2 ;;
     --pr) PR_URL="$2"; shift 2 ;;
     --body-file) BODY_FILE="$2"; shift 2 ;;
-    *) echo "Unbekannte Option: $1" >&2; exit 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
@@ -34,21 +35,21 @@ case "$STAGE" in
   unresolved) STATUS="review"; UNRESOLVED=true ;;
   rework) STATUS="working" ;;
   architecture|implementing|verifying) STATUS="working"; STEP="$STAGE" ;;
-  *) echo "Unbekannter Stand '$STAGE'. Erlaubt: checking approved question rejected architecture implementing verifying built accepted rework unresolved failed" >&2; exit 2 ;;
+  *) echo "Unknown state '$STAGE'. Allowed: checking approved question rejected architecture implementing verifying built accepted rework unresolved failed" >&2; exit 2 ;;
 esac
-# In der Abnahme sind Zwischenschritte kein Statuswechsel: der Status bleibt "Abnahme"
+# During acceptance, intermediate steps do not change the status: it stays "accepting"
 if [ "${PHASE:-build}" = "accept" ] && { [ "$STATUS" = "checking" ] || { [ "$STATUS" = "working" ] && [ "$STAGE" != "rework" ]; }; }; then
   STATUS="accepting"; STEP=""
 fi
-[ -n "$SUMMARY" ] || { echo "Zusammenfassung fehlt" >&2; exit 2; }
-case "$STAGE" in question|rejected) [ -n "$QUESTION" ] || { echo "$STAGE braucht --question" >&2; exit 2; } ;; esac
-case "$STAGE" in built|accepted|review|unresolved) [ -n "$PR_URL" ] || { echo "$STAGE braucht --pr <url>" >&2; exit 2; } ;; esac
-{ [ "$STAGE" = "rework" ] || [ "$STAGE" = "unresolved" ]; } && { [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] || { echo "rework braucht --body-file mit den Befunden" >&2; exit 2; }; }
+[ -n "$SUMMARY" ] || { echo "Summary missing" >&2; exit 2; }
+case "$STAGE" in question|rejected) [ -n "$QUESTION" ] || { echo "$STAGE needs --question" >&2; exit 2; } ;; esac
+case "$STAGE" in built|accepted|review|unresolved) [ -n "$PR_URL" ] || { echo "$STAGE needs --pr <url>" >&2; exit 2; } ;; esac
+{ [ "$STAGE" = "rework" ] || [ "$STAGE" = "unresolved" ]; } && { [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] || { echo "$STAGE needs --body-file with the findings" >&2; exit 2; }; }
 
 : "${REPO:?}" "${ISSUE:?}"
 PHASE="${PHASE:-build}"
 
-# Status-Label tauschen
+# Swap the status label
 CURRENT=$(gh issue view "$ISSUE" -R "$REPO" --json labels --jq '.labels[].name' | grep '^factory:' || true)
 ARGS=(--add-label "factory:$STATUS")
 for L in $CURRENT; do [ "$L" != "factory:$STATUS" ] && ARGS+=(--remove-label "$L"); done
@@ -58,40 +59,61 @@ MARK="<!-- software-factory:$STATUS:$PHASE -->"
 [ "$STAGE" = "rework" ] && MARK="<!-- software-factory:rework:$PHASE -->"
 comment() { gh issue comment "$ISSUE" -R "$REPO" --body-file - >/dev/null; }
 
+# Fixed texts in the project language
+case "$(printf '%s' "${FACTORY_LANGUAGE:-de}" | cut -d- -f1 | tr '[:upper:]' '[:lower:]')" in
+  de)
+    T_APPROVED="### ✅ Geprüft und freigegeben"; T_APPROVED_NOTE="_Die Factory entwickelt das Feature, sobald ein Platz frei ist._"
+    T_QUESTION="### ❓ Rückfrage"; T_QUESTION_NOTE="_Antworte einfach hier im Issue. Die Factory macht danach automatisch weiter._"
+    T_REJECTED="### ⛔ So kann die Factory das nicht umsetzen"; T_REJECTED_NOTE="_Wenn du die Spec angepasst hast, schreib hier einen kurzen Kommentar. Dann prüft die Factory erneut._"
+    T_BUILT="### 🔎 Pull Request erstellt, unabhängige Abnahme folgt:"
+    T_ACCEPTED="### 👀 Abnahme bestanden, bereit zum Review:"; T_ACCEPTED_NOTE="_Review und Merge machst du. Änderungswünsche einfach hier ins Issue schreiben._"
+    T_ACCEPTANCE_PR="### ✅ Unabhängige Abnahme"
+    T_UNRESOLVED="### ⚠️ Abnahme nicht bestanden, du entscheidest:"; T_UNRESOLVED_NOTE="_Die Factory hat die Befunde nach mehreren Runden nicht beheben können. Prüf den PR selbst: Änderungswünsche hier ins Issue schreiben, oder PR schließen._"
+    T_UNRESOLVED_PR="### ⚠️ Unabhängige Abnahme: nicht bestanden"
+    T_REWORK="### 🔁 Abnahme nicht bestanden, zurück in die Entwicklung"
+    T_FAILED="### ⚠️ Die Factory kommt nicht weiter"; T_FAILED_NOTE="_Schreib einen Kommentar mit einem Hinweis, dann versucht sie es erneut._" ;;
+  *)
+    T_APPROVED="### ✅ Checked and approved"; T_APPROVED_NOTE="_The factory builds the feature as soon as a slot is free._"
+    T_QUESTION="### ❓ Question"; T_QUESTION_NOTE="_Just reply here in the issue. The factory continues automatically afterwards._"
+    T_REJECTED="### ⛔ The factory cannot build it like this"; T_REJECTED_NOTE="_Once you have updated the spec, write a short comment here. The factory then checks again._"
+    T_BUILT="### 🔎 Pull request created, independent acceptance follows:"
+    T_ACCEPTED="### 👀 Acceptance passed, ready for review:"; T_ACCEPTED_NOTE="_Review and merge are yours. Just write change requests here in the issue._"
+    T_ACCEPTANCE_PR="### ✅ Independent acceptance"
+    T_UNRESOLVED="### ⚠️ Acceptance failed, your decision:"; T_UNRESOLVED_NOTE="_The factory could not fix the findings after several rounds. Check the PR yourself: write change requests here in the issue, or close the PR._"
+    T_UNRESOLVED_PR="### ⚠️ Independent acceptance: failed"
+    T_REWORK="### 🔁 Acceptance failed, back to development"
+    T_FAILED="### ⚠️ The factory is stuck"; T_FAILED_NOTE="_Write a comment with a hint and it will try again._" ;;
+esac
+
 case "$STAGE" in
   approved)
-    { echo "$MARK"; echo "### ✅ Geprüft und freigegeben"; echo; echo "$SUMMARY"; echo;
-      echo "_Die Factory entwickelt das Feature, sobald ein Platz frei ist._"; } | comment ;;
+    { echo "$MARK"; echo "$T_APPROVED"; echo; echo "$SUMMARY"; echo; echo "$T_APPROVED_NOTE"; } | comment ;;
   question)
-    { echo "$MARK"; echo "### ❓ Rückfrage"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
-      echo "_Antworte einfach hier im Issue. Die Factory macht danach automatisch weiter._"; } | comment ;;
+    { echo "$MARK"; echo "$T_QUESTION"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo; echo "$T_QUESTION_NOTE"; } | comment ;;
   rejected)
-    { echo "$MARK"; echo "### ⛔ So kann die Factory das nicht umsetzen"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo;
-      echo "_Wenn du die Spec angepasst hast, schreib hier einen kurzen Kommentar. Dann prüft die Factory erneut._"; } | comment ;;
+    { echo "$MARK"; echo "$T_REJECTED"; echo; echo "$SUMMARY"; echo; echo "$QUESTION"; echo; echo "$T_REJECTED_NOTE"; } | comment ;;
   built)
-    { echo "$MARK"; echo "### 🔎 Pull Request erstellt, unabhängige Abnahme folgt: $PR_URL"; echo; echo "$SUMMARY"; } | comment ;;
+    { echo "$MARK"; echo "$T_BUILT $PR_URL"; echo; echo "$SUMMARY"; } | comment ;;
   accepted|review)
     REPORT=""; [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ] && REPORT=$(cat "$BODY_FILE")
-    { echo "$MARK"; echo "### 👀 Abnahme bestanden, bereit zum Review: $PR_URL"; echo; echo "$SUMMARY";
+    { echo "$MARK"; echo "$T_ACCEPTED $PR_URL"; echo; echo "$SUMMARY";
       [ -n "$REPORT" ] && { echo; echo "$REPORT"; }
-      echo; echo "_Review und Merge machst du. Änderungswünsche einfach hier ins Issue schreiben._"; } | comment
+      echo; echo "$T_ACCEPTED_NOTE"; } | comment
     if [ -n "$REPORT" ]; then
       PR_NR="${PR_URL##*/}"
-      { echo "<!-- software-factory:acceptance -->"; echo "### ✅ Unabhängige Abnahme"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true
+      { echo "<!-- software-factory:acceptance -->"; echo "$T_ACCEPTANCE_PR"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true
     fi ;;
   unresolved)
     REPORT=$(cat "$BODY_FILE")
-    { echo "$MARK"; echo "### ⚠️ Abnahme nicht bestanden, du entscheidest: $PR_URL"; echo; echo "$SUMMARY"; echo; echo "$REPORT"; echo;
-      echo "_Die Factory hat die Befunde nach mehreren Runden nicht beheben können. Prüf den PR selbst: Änderungswünsche hier ins Issue schreiben, oder PR schließen._"; } | comment
+    { echo "$MARK"; echo "$T_UNRESOLVED $PR_URL"; echo; echo "$SUMMARY"; echo; echo "$REPORT"; echo; echo "$T_UNRESOLVED_NOTE"; } | comment
     PR_NR="${PR_URL##*/}"
-    { echo "<!-- software-factory:acceptance -->"; echo "### ⚠️ Unabhängige Abnahme: nicht bestanden"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true ;;
+    { echo "<!-- software-factory:acceptance -->"; echo "$T_UNRESOLVED_PR"; echo; echo "$REPORT"; } | gh pr comment "$PR_NR" -R "$REPO" --body-file - >/dev/null || true ;;
   rework)
-    { echo "$MARK"; echo "### 🔁 Abnahme nicht bestanden, zurück in die Entwicklung"; echo; echo "$SUMMARY"; echo; cat "$BODY_FILE"; } | comment ;;
+    { echo "$MARK"; echo "$T_REWORK"; echo; echo "$SUMMARY"; echo; cat "$BODY_FILE"; } | comment ;;
   failed)
-    { echo "$MARK"; echo "### ⚠️ Die Factory kommt nicht weiter"; echo; echo "$SUMMARY"; echo;
-      echo "_Schreib einen Kommentar mit einem Hinweis, dann versucht sie es erneut._"; } | comment ;;
+    { echo "$MARK"; echo "$T_FAILED"; echo; echo "$SUMMARY"; echo; echo "$T_FAILED_NOTE"; } | comment ;;
 esac
 
 jq -n --arg status "$STATUS" --arg step "$STEP" --arg phase "$PHASE" --arg summary "$SUMMARY" --arg question "$QUESTION" --arg pr "$PR_URL" --argjson unresolved "$UNRESOLVED" \
-  '{status:$status, step:$step, phase:$phase, summary:$summary, question:$question, pr:$pr, unresolved:$unresolved, at:(now|todate)}' > /work/status.json
-echo "Gemeldet: $STAGE"
+  '{status:$status, step:$step, phase:$phase, summary:$summary, question:$question, pr:$pr, unresolved:$unresolved, at:(now|todate)}' > "${FACTORY_WORK:-/work}/status.json"
+echo "Reported: $STAGE"

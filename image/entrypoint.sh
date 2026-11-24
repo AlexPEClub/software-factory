@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Startet einen Factory-Job: Repo holen, Branch auschecken, Claude Code mit Playbook laufen lassen.
-# Erwartet: REPO, ISSUE, BRANCH, MODEL, WORKFLOW, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN (oder ANTHROPIC_API_KEY)
-# und /work/prompt.md (vom Runner geschrieben). RESUME=1: Fortsetzung nach dem Nutzungslimit mit demselben
+# Erwartet: REPO, ISSUE, BRANCH, MODEL, WORKFLOW, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN (oder ANTHROPIC_API_KEY),
+# FACTORY_LANGUAGE (Projektsprache, BCP 47, Standard de) und /work/prompt.md (vom Runner geschrieben). RESUME=1: Fortsetzung nach dem Nutzungslimit mit demselben
 # Arbeitsstand und derselben Claude-Session.
 set -euo pipefail
 # Fehlermeldungen (git, gh …) ins selbe Log wie die übrigen Ausgaben: Der Runner zeigt dessen Ende,
@@ -15,6 +15,7 @@ MODEL="${MODEL:-opus}"
 export PHASE="${PHASE:-build}"   # check = prüfen, build = entwickeln, accept = unabhängige Abnahme
 WORKFLOW="${WORKFLOW:-starter-kit}"
 RESUME="${RESUME:-}"
+export FACTORY_LANGUAGE="${FACTORY_LANGUAGE:-de}"   # für factory-report, factory-verify und die Skills
 
 # Workflow-Skills als Nutzer-Skills bereitstellen (landen nicht im Ziel-Repo)
 mkdir -p "$HOME/.claude/skills"
@@ -80,7 +81,7 @@ if [ "$RESUME" = "1" ] && [ -s "$SESSION_FILE" ]; then
   SID=$(head -c 100 "$SESSION_FILE" | tr -cd 'a-zA-Z0-9-')
   if [ -n "$SID" ] && compgen -G "/work/claude-sessions/*/$SID.jsonl" >/dev/null; then
     RESUME_ARGS=(--resume "$SID")
-    PROMPT="Der Lauf wurde durch das Nutzungslimit von Claude Code unterbrochen und wird jetzt fortgesetzt. Mach genau dort weiter, wo du aufgehört hast (gleiche Phase, gleiche Regeln). Prüfe zuerst mit git status und git log, was schon erledigt ist."
+    PROMPT="The run was interrupted by the Claude Code usage limit and is now being resumed. Continue exactly where you stopped (same phase, same rules, same output language: ${FACTORY_LANGUAGE:-de}). First check with git status and git log what is already done."
     log "Setze Claude-Session $SID fort"
   else
     log "Keine Session zum Fortsetzen gefunden, starte neu mit dem Arbeitsstand"

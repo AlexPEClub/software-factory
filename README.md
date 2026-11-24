@@ -85,6 +85,7 @@ Die Factory liest `.factory/setup.json` im Ziel-Repo:
 
 ```json
 {
+  "language": "de",
   "install": "npm ci",
   "dev": "npm run dev -- -p $PORT",
   "checks": {
@@ -98,6 +99,23 @@ Die Factory liest `.factory/setup.json` im Ziel-Repo:
 
 `/init` legt sie passend zum Stack an. Braucht dein Stack eine andere Laufzeit als Node oder Python, ergänzt `/init` eine `.factory/Dockerfile`, die auf dem Factory-Image aufbaut.
 
+## Sprache
+
+Jedes Projekt hat eine **Projektsprache**, in der die Factory alles schreibt, was Menschen lesen: Dokumente, Specs, Kommentare in Issues, Pull Requests und den Text der Commit-Nachrichten. `/init` erkennt die Sprache des Briefings und fragt zuerst, ob die Factory sie verwenden soll oder eine andere. Die Antwort steht als BCP-47-Code in `.factory/setup.json`:
+
+```json
+{ "language": "en", "install": "npm ci", "checks": { "test": "npm test" } }
+```
+
+- **Deutsch und Englisch** sind vollständig unterstützt: Die festen Texte der Factory (Status-Kommentare, Check-Tabelle) und die Vorlagen (`template.de.md`, `template.en.md`) gibt es in beiden Sprachen.
+- **Andere Sprachen** (z. B. `fr`, `pt-BR`): Die Agents schreiben in dieser Sprache und übersetzen die englischen Vorlagen, die festen Status-Kommentare der Factory erscheinen auf Englisch.
+- **Immer Englisch:** Bezeichner im Code, Code-Kommentare und die Präfixe der Commit-Nachrichten (`feat(PROJ-3):`).
+- **IDs:** Akzeptanzkriterien heißen in deutschen Specs `AK-1`, sonst `AC-1`, Edge Cases überall `EC-1`.
+- **Ohne Angabe** gilt Deutsch. Bestehende Projekte verhalten sich also wie bisher.
+- Die **Sprache der App-Oberfläche** ist davon unabhängig. `/init` fragt sie getrennt ab und hält sie in `docs/PRD.md` fest.
+
+Die Anweisungen an die Agents (Playbook, Skills, Prompt) sind auf Englisch, damit nichts die Ausgabe in eine Sprache zieht. Die **Factory-Sprache** (`language` in `/etc/software-factory/config.json`, `de` oder `en`) gilt für die Spalten des gemeinsamen Boards und Hinweise auf dem Server. Die Projekt-Vorlage [factory-template](https://github.com/AlexPEClub/factory-template) ist deutsch; für andere Projektsprachen übersetzt `/init` ihre Überschriften beim Ausfüllen. Wer viele englische Projekte anlegt, kann eine eigene englische Vorlage pflegen und mit `FACTORY_TEMPLATE` an `new-project.sh` übergeben.
+
 ## Claude-Abo: was ist erlaubt?
 
 Die Factory startet die **unveränderte, offizielle Claude Code CLI** auf deinem eigenen Server. Angemeldet wird mit deinem eigenen Abo über `claude setup-token`, den Weg, den Anthropic für Skripte und CI dokumentiert ([Authentication](https://code.claude.com/docs/en/authentication)). Das Repo speichert oder teilt keine fremden Logins.
@@ -110,7 +128,7 @@ Die Factory startet die **unveränderte, offizielle Claude Code CLI** auf deinem
 
 - Jeder Lauf hat einen eigenen Container mit Speicher- und Prozesslimit. Standard: zwei Agent-Läufe gleichzeitig (`maxParallel: 2`), passend zu 8 GB RAM.
 - Antworten und Änderungswünsche nimmt die Factory nur von dir an (plus `allowedUsers`). Fremde Kommentare sieht der Agent nicht.
-- Ein Bau zählt nur, wenn `factory-verify` auf genau dem gepushten Commit grün ist und die Spec unverändert bleibt. Besteht die Abnahme nach zwei Runden nicht, landet der PR mit „Abnahme nicht bestanden“ bei dir, nie als bestanden.
+- Ein Bau zählt nur, wenn `factory-verify` auf genau dem gepushten Commit grün ist und die Spec unverändert bleibt. Besteht die Abnahme nach zwei Runden nicht, landet der PR mit „Abnahme nicht bestanden“ (bzw. „Acceptance failed“) bei dir, nie als bestanden.
 - Vorschauen laufen ohne Zugangsdaten, mit Passwort und mit Domain über HTTPS.
 - Die Agents arbeiten mit deinem GitHub-Login. Für mehr Trennung: eigener GitHub-Account für die Factory oder ein Fine-grained Token, der nur deine Factory-Repos erreicht.
 - Getestet: Ubuntu 24.04 auf Hostinger KVM 2, Next.js-Projekte. Weitere Stacks sind vorgesehen, aber noch nicht erprobt.
