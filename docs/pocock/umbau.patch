@@ -1,0 +1,385 @@
+diff --git a/image/Dockerfile b/image/Dockerfile
+index dcd2ed3..c8a35be 100644
+--- a/image/Dockerfile
++++ b/image/Dockerfile
+@@ -33,6 +33,15 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
+ # Python-Projekte: uv (verwaltet Python-Versionen und Pakete selbst)
+ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ ENV PATH=/home/pwuser/.local/bin:$PATH
++# Matt Pococks Skills (github.com/mattpocock/skills, MIT-Lizenz), fester Stand für reproduzierbare Läufe.
++# Aktualisieren: Commit-Hash ändern und das Image neu bauen (factory-rollout).
++ARG MATT_SKILLS_REF=d65391149dbb5fe76478e76fa8d5122b2aa5a70e
++RUN git clone -q https://github.com/mattpocock/skills /tmp/mps \
++ && git -C /tmp/mps checkout -q "$MATT_SKILLS_REF" \
++ && mkdir -p /home/pwuser/.claude/skills \
++ && for d in /tmp/mps/skills/engineering/*/ /tmp/mps/skills/productivity/*/ /tmp/mps/skills/misc/*/; do cp -r "$d" /home/pwuser/.claude/skills/; done \
++ && cp /tmp/mps/LICENSE /home/pwuser/.claude/skills/LICENSE-mattpocock-skills \
++ && rm -rf /tmp/mps
+ 
+ WORKDIR /work
+ ENTRYPOINT ["/factory/entrypoint.sh"]
+diff --git a/image/entrypoint.sh b/image/entrypoint.sh
+index e5f517e..9d8b14c 100755
+--- a/image/entrypoint.sh
++++ b/image/entrypoint.sh
+@@ -50,16 +50,83 @@ if [ "$PHASE" != "check" ] && [ -f .factory/setup.json ]; then
+ fi
+ 
+ export FACTORY_DEFAULT_BRANCH="$DEFAULT_BRANCH"
+-log "Starte Claude Code ($MODEL, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
++MODE="${MODE:-new}"
++
++# Playbook: eigenes pro Workflow, sonst das allgemeine
++PLAYBOOK="/factory/workflows/$WORKFLOW/playbook.md"
++[ -f "$PLAYBOOK" ] || PLAYBOOK=/factory/playbook.md
++
++# Ein Claude-Code-Aufruf. Alle Aufrufe eines Laufs landen hintereinander in /work/claude.jsonl.
++run_claude() {
++  claude -p "$1" \
++    --append-system-prompt-file "$PLAYBOOK" \
++    --add-dir "/factory/workflows" \
++    --model "$MODEL" \
++    --dangerously-skip-permissions \
++    --output-format stream-json --verbose \
++    >> /work/claude.jsonl 2>> /work/claude.err < /dev/null
++}
++
++# Hat der Agent schon einen Endstand gemeldet (Rückfrage, Fehlschlag …)? Dann keinen weiteren Schritt starten.
++reported_end() {
++  local st; st=$(jq -r '.status // empty' /work/status.json 2>/dev/null || true)
++  case "$st" in question|failed|rejected|approved|accepting|review) return 0 ;; esac
++  return 1
++}
++
++# Anweisungen eines Schritts mit den Werten dieses Laufs
++step_text() { sed -e 's/\$FACTORY_DEFAULT_BRANCH/'"$DEFAULT_BRANCH"'/g' -e 's/\$ISSUE/'"$ISSUE"'/g' "/factory/workflows/$WORKFLOW/steps/$1.md"; }
++
++: > /work/claude.jsonl; : > /work/claude.err
+ set +e
+-claude -p "$(cat /work/prompt.md)" \
+-  --append-system-prompt-file /factory/playbook.md \
+-  --add-dir "/factory/workflows/$WORKFLOW" \
+-  --model "$MODEL" \
+-  --dangerously-skip-permissions \
+-  --output-format stream-json --verbose \
+-  > /work/claude.jsonl 2> /work/claude.err
+-CODE=$?
++if [ "$WORKFLOW" = "pocock" ] && [ "$PHASE" = "build" ]; then
++  # Matt Pococks Skills dürfen nur per /befehl gestartet werden: die Factory ruft sie nacheinander auf, jeder Schritt mit frischem Kontext.
++  ISSUE_URL="https://github.com/$REPO/issues/$ISSUE"
++  CODE=0
++  if [ "$MODE" = "new" ] || [ "$MODE" = "retry" ]; then
++    SUBS=$(gh issue view "$ISSUE" -R "$REPO" --json subIssues --jq '.subIssues.totalCount' 2>/dev/null || echo 0)
++    if [ "${SUBS:-0}" = "0" ]; then
++      log "Schritt 1: /to-tickets"
++      factory-report architecture "Spec wird in Tickets zerlegt (/to-tickets)" >/dev/null
++      run_claude "/to-tickets $ISSUE_URL
++
++$(step_text to-tickets)
++
++$(cat /work/prompt.md)"; CODE=$?
++    fi
++    if [ $CODE -eq 0 ] && ! reported_end; then
++      log "Schritt 2: /implement-spec"
++      factory-report implementing "Tickets werden umgesetzt (/implement-spec)" >/dev/null
++      run_claude "/implement-spec $ISSUE_URL
++
++$(step_text implement-spec)
++
++$(cat /work/prompt.md)"; CODE=$?
++    fi
++  else
++    log "Schritt 2: /implement ($MODE)"
++    factory-report implementing "Befunde bzw. Änderungswunsch werden umgesetzt (/implement)" >/dev/null
++    run_claude "/implement $ISSUE_URL
++
++$(step_text implement)
++
++$(cat /work/prompt.md)"; CODE=$?
++  fi
++  if [ $CODE -eq 0 ] && ! reported_end; then
++    log "Schritt 3: Abschluss"
++    run_claude "$(cat /work/prompt.md)
++
++$(step_text finish)"; CODE=$?
++  fi
++  # Eine Gesamtzeile für den Runner: Kosten, Schritte und Dauer aller Aufrufe zusammen
++  jq -s -c '[.[] | select(.type == "result")] | {type: "result", subtype: "factory-total",
++      is_error: (map(.is_error // false) | any), num_turns: (map(.num_turns // 0) | add // 0),
++      duration_ms: (map(.duration_ms // 0) | add // 0), total_cost_usd: (map(.total_cost_usd // 0) | add // 0),
++      result: (last.result // "")}' /work/claude.jsonl >> /work/claude.jsonl 2>/dev/null
++else
++  log "Starte Claude Code ($MODEL, Phase: $PHASE, Workflow: $WORKFLOW) für $REPO#$ISSUE auf $BRANCH"
++  run_claude "$(cat /work/prompt.md)"; CODE=$?
++fi
+ set -e
+ log "Claude Code beendet mit Exit-Code $CODE"
+ tail -n 1 /work/claude.jsonl | jq -r '"Ergebnis: " + ((.result // "-") | tostring | .[0:500])' 2>/dev/null || true
+diff --git a/runner/main.ts b/runner/main.ts
+index 63cc5d3..f4d56c3 100644
+--- a/runner/main.ts
++++ b/runner/main.ts
+@@ -35,7 +35,7 @@ export type Config = {
+ };
+ 
+ type Comment = { author: { login: string } | null; body: string; createdAt: string };
+-type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[] };
++type Issue = { number: number; title: string; body: string; url: string; labels: { name: string }[]; comments: Comment[]; parent?: { number: number } | null };
+ type Container = { name: string; repo: string; issue: number; phase: Phase; mode: string; running: boolean; startedAt: string; finishedAt: string; exitCode: number };
+ type Phase = "check" | "build" | "accept";
+ type Mode = "new" | "answer" | "change-request" | "retry" | "rework";
+@@ -203,6 +203,17 @@ export function humanCommentsSinceFactory(cfg: Config, issue: Issue): Comment[]
+   return issue.comments.slice(last + 1).filter((c) => !c.body.includes(MARK) && isTrusted(cfg, loginOf(c)));
+ }
+ 
++async function listOpenIssues(cfg: Config, repo: string): Promise<Issue[]> {
++  const args = ["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open", "--limit", "100", "--json"];
++  try { return JSON.parse(await gh([...args, "number,title,body,url,labels,comments,parent"])); }
++  catch (e) {
++    // Ältere GitHub CLI kennt das Feld "parent" noch nicht
++    if (!String(e).includes("parent")) throw e;
++    log("gh:no-parent-field", { hint: "GitHub CLI aktualisieren (ab 2.94), sonst werden Sub-Issues nicht erkannt" });
++    return JSON.parse(await gh([...args, "number,title,body,url,labels,comments"]));
++  }
++}
++
+ async function findPr(repo: string, n: number, state: "open" | "merged" | "all") {
+   const prs = JSON.parse(await gh(["pr", "list", "-R", repo, "--head", `factory/${n}`, "--state", state, "--json", "number,url,state"]));
+   return prs[0] as { number: number; url: string; state: string } | undefined;
+@@ -315,7 +326,9 @@ export function buildPrompt(cfg: Config, repo: string, issue: Issue, phase: Phas
+   const start = phase === "check"
+     ? `Phase **Prüfung**: Prüfe nur, entwickle nichts. Beginne mit \`factory-report checking "..."\` und ende mit approved (vorher Testszenarien nach /scenarios/scenarios.md), question oder rejected.`
+     : phase === "build"
+-      ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
++      ? cfg.workflow === "pocock"
++        ? `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Die Factory steuert die Schritte; was jetzt zu tun ist, steht in den Anweisungen zu diesem Schritt.`
++        : `Phase **Bau**: Die Prüfung ist bestanden (siehe Verlauf). Beginne mit \`factory-report architecture "..."\` (bei Änderungswunsch oder Rückgabe aus der Abnahme direkt mit implementing). Ende mit built.`
+       : `Phase **Abnahme**: Du bist der unabhängige Prüfer für den PR ${prUrl ?? ""}. Ende mit accepted, rework oder (nur in der letzten Runde) unresolved.`;
+   return [
+     `# Auftrag`,
+@@ -377,7 +390,7 @@ async function launch(cfg: Config, repo: string, issue: Issue, phase: Phase, mod
+     "--label", "software-factory=1", "--label", `sf.repo=${repo}`, "--label", `sf.issue=${issue.number}`, "--label", `sf.phase=${phase}`, "--label", `sf.mode=${mode}`,
+     ...agentLimits(cfg),
+     "-e", `REPO=${repo}`, "-e", `ISSUE=${issue.number}`, "-e", `BRANCH=factory/${issue.number}`,
+-    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`,
++    "-e", `MODEL=${cfg.model}`, "-e", `WORKFLOW=${cfg.workflow}`, "-e", `PHASE=${phase}`, "-e", `MODE=${mode}`,
+     "-e", "GH_TOKEN", "-e", authVar, // Werte kommen aus der Umgebung, nicht aus der Kommandozeile
+     "-v", `${dir}:/work`, ...scenarioMount,
+     await imageFor(cfg, repo),
+@@ -653,8 +666,9 @@ async function lostJob(cfg: Config, repo: string, issue: Issue): Promise<boolean
+ }
+ 
+ async function tickRepo(cfg: Config, repo: string, containers: Container[], slots: { free: number }) {
+-  const issues: Issue[] = JSON.parse(await gh(["issue", "list", "-R", repo, "--label", cfg.label, "--state", "open",
+-    "--json", "number,title,body,url,labels,comments", "--limit", "100"]));
++  const issues: Issue[] = (await listOpenIssues(cfg, repo))
++    // Sub-Issues (z. B. Tickets aus /to-tickets) sind Teil ihrer Spec und keine eigenen Aufgaben
++    .filter((i) => !i.parent);
+   issues.sort((a, b) => a.number - b.number); // älteste zuerst
+   const openNumbers = new Set(issues.map((i) => i.number));
+ 
+diff --git a/workflows/pocock/playbook.md b/workflows/pocock/playbook.md
+new file mode 100644
+index 0000000..52a1529
+--- /dev/null
++++ b/workflows/pocock/playbook.md
+@@ -0,0 +1,94 @@
++# Factory-Playbook
++
++Du arbeitest als Agent in der **Software Factory**. Du bearbeitest genau **ein GitHub Issue** unbeaufsichtigt in einem eigenen Container. Niemand liest diesen Chat mit. Was du tust, sieht der Mensch nur über drei Wege: den Status am Issue (Label und Board), die Kommentare im Issue und den Pull Request.
++
++Jeder Lauf hat genau **eine Phase**, sie steht in der ersten Nachricht:
++- **Prüfung:** Du prüfst, ob das Issue so umgesetzt werden kann, und schreibst Testszenarien für die spätere Abnahme. Du entwickelst nichts.
++- **Bau:** Die Prüfung ist bestanden. Die Factory ruft nacheinander `/to-tickets`, `/implement-spec` und den Abschluss auf. Was im jeweiligen Schritt zu tun ist, steht am Ende der ersten Nachricht.
++- **Abnahme:** Du bist ein unabhängiger Prüfer. Du testest den fertigen Pull Request gegen Spec und Testszenarien. Du entwickelst nichts.
++
++Deine Umgebung:
++- Repo unter `/work/repo`, du bist auf dem Branch aus der ersten Nachricht (`factory/<nummer>`).
++- `gh` ist eingeloggt. `REPO`, `ISSUE` und `PHASE` sind als Umgebungsvariablen gesetzt.
++- Werkzeuge: `factory-report`, `factory-verify`, `factory-screenshot`.
++- Der Entwicklungs-Workflow ist **Matt Pococks Workflow** (`/factory/workflows/pocock/workflow.md`). Seine Skills sind installiert. Die Konfiguration für das Repo steht in `docs/agents/*.md` (Issue-Tracker GitHub).
++
++## Feste Regeln (immer)
++
++1. **Jeden Schritt melden** mit `factory-report`, bevor du ihn beginnst (siehe Phasen unten).
++2. **Nie im Chat fragen.** Kein `AskUserQuestion`, kein Plan-Modus, keine Frage, auf die du wartest. Hier antwortet niemand.
++3. **Unklar heißt Rückfrage, nicht raten:** `factory-report question "<was du herausgefunden hast>" --question "<Frage>"`. Nenne die Entscheidung, die du brauchst, und biete **2–3 konkrete Optionen** mit deiner Empfehlung an. Danach beendest du die Arbeit.
++4. **Die Spec ist der Vertrag.** Die Spec ist das GitHub Issue, das der Mensch mit `/to-spec` angelegt hat. Du änderst den Issue-Text nie (kein `gh issue edit --body`).
++5. **Nie selbst mergen.** Kein `gh pr merge`, kein Auto-Merge, kein Push auf den Standard-Branch.
++6. **Belege statt Behauptungen.** Vor dem Review läuft `factory-verify` auf dem finalen, gepushten Commit. Bei sichtbaren Änderungen Screenshots mit `factory-screenshot`.
++7. **Nur aufräumen, was du gestartet hast.** Dev-Server auf freiem Port starten, PID merken, vor dem Ende stoppen. Nie Prozesse per Name beenden.
++8. **Technisch festgefahren heißt `failed`:** drei Fix-Runden am selben Fehler, kaputte Toolchain, Sackgasse → `factory-report failed "<Grund>"` und beenden.
++
++## Phase „Prüfung"
++
++Ziel: eine klare Entscheidung in wenigen Minuten. **Kein Code, keine Commits, kein Push.**
++
++1. `factory-report checking "<was du prüfst>"`
++2. Lies Issue und alle Kommentare. Antworten des Menschen auf frühere Fragen gelten verbindlich.
++3. Entscheide: **Feature** (neues Verhalten) oder **Bug** (Verhalten weicht vom erwarteten ab).
++
++**Feature**
++- Die Spec ist der Issue-Text selbst, angelegt mit `/to-spec` (Abschnitte Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope).
++- **Keine vollständige Spec** (Abschnitte fehlen, nur eine Idee oder ein Satz) → ablehnen:
++  `factory-report rejected "Für dieses Feature gibt es noch keine vollständige Spec." --question "Bitte kläre das Feature lokal mit /grill-with-docs und leg die Spec mit /to-spec an. Sie bekommt dann automatisch das Label factory."`
++- **Spec vorhanden:** vollständig lesen, dazu `GLOSSARY.md`, `docs/adr/`, `docs/stack.md`, `docs/PRD.md` (falls vorhanden) und einen Blick in den bestehenden Code. Prüfe:
++  - Lassen sich die User Stories eindeutig prüfen?
++  - Gibt es Widersprüche in der Spec oder zum bestehenden Code, zu ADRs, zur PRD?
++  - Passt es zum Stack in `docs/stack.md`, oder bräuchte es neue Dienste (Datenbank, Login, Bezahlung …), die dort nicht vorgesehen sind?
++  - Fehlen Voraussetzungen (ein Feature, das die Spec braucht, ist noch nicht gebaut)?
++- Entscheidung:
++  - **Klein und eindeutig klärbar** (eine Story unklar, eine Entscheidung fehlt) → `question`
++  - **Grundlegend nicht baubar** (widersprüchlich, nicht prüfbar, außerhalb des Stacks, Voraussetzung fehlt) → `rejected` mit Grund und dem, was der Mensch ändern muss
++  - **Baubar** → zuerst die **Testszenarien** schreiben (siehe unten), dann `factory-report approved "<2–3 Sätze: was entwickelt wird und welche Annahmen du treffen wirst>"`
++
++**Bug**
++- Ist klar, was falsch ist und was stattdessen passieren soll? Lässt es sich nachvollziehen? Dann Testszenarien schreiben und `approved`. Sonst `question` (z. B. erwartetes Verhalten fehlt).
++
++**Testszenarien für die Abnahme** (nur bei `approved`)
++- Schreibe sie nach `/scenarios/scenarios.md`. Dieser Ordner liegt **außerhalb des Repos**. Der Entwickler-Agent sieht ihn nie, nur die spätere Abnahme. Nichts davon ins Repo, in Commits oder Kommentare schreiben.
++- Pro User Story (bzw. pro Bug) mindestens ein Szenario, dazu die wichtigsten Randfälle. Jedes Szenario mit ID (`S-1` …), Bezug (`US-3`), Ausgangslage, konkreten Schritten im Browser bzw. Aufruf, erwartetem Ergebnis.
++- Formuliere aus Sicht eines Nutzers, ohne Wissen über die spätere Umsetzung (keine Dateinamen, keine Funktionsnamen).
++
++Danach beendest du die Arbeit.
++
++## Phase „Bau"
++
++Die Factory steuert den Bau in festen Schritten, jeder Schritt ist ein eigener Aufruf mit frischem Kontext. Was im aktuellen Schritt zu tun ist, steht am Ende der ersten Nachricht („Factory-Modus für …“ bzw. „Abschluss des Bau-Laufs“). Halte dich genau daran.
++
++- **Architektur:** `/to-tickets` zerlegt die Spec in Sub-Issues (ohne Rückfrage an den Menschen).
++- **Umsetzung:** `/implement-spec` setzt die Tickets auf `factory/<nummer>` um und öffnet einen Entwurfs-PR. Bei Rückgabe aus der Abnahme, Änderungswunsch oder neuem Versuch stattdessen `/implement` mit den Befunden.
++- **Tests:** Abschluss mit `factory-verify`, PR-Text nach Skill `pr` und Meldung `built`.
++
++Die Factory meldet die Schritte `architecture`, `implementing` und `verifying` selbst. Du meldest nur `question`, `failed` und im Abschluss `built`.
++
++**Ehrlich einschätzen:** Im PR-Text unter „Merge Danger“ offen sagen, was riskant ist und wo du unsicher bist.
++
++## Phase „Abnahme"
++
++Du bist ein **unabhängiger Prüfer**. Du hast nichts entwickelt und vertraust keiner Behauptung im PR-Text. Du prüfst nur, was du selbst siehst. **Kein Code ändern, keine Commits, kein Push.**
++
++Zwischenstände meldest du in dieser Phase nicht. Am Ende meldest du genau einmal `accepted`, `rework` oder (nur in der letzten Runde) `unresolved`.
++
++1. Lies die Spec (das Issue aus der ersten Nachricht), die Akzeptanzkriterien seiner Sub-Issues (`gh issue view <nr> --json subIssues`, dann jedes Ticket) und die Testszenarien unter `/scenarios/scenarios.md`. Fehlen die Szenarien, leite sie selbst aus User Stories und Akzeptanzkriterien ab und vermerke das im Bericht.
++2. Du bist auf dem Branch des Pull Requests. Führe `factory-verify` aus.
++3. Starte die App (`.factory/setup.json` → `dev`) auf einem freien Port und teste **jedes Szenario selbst im Browser** (Playwright-Skript mit Node, Chromium ist installiert). Halte wichtige Zustände mit `factory-screenshot` fest.
++4. Prüfe zusätzlich kurz auf Offensichtliches: Konsolenfehler, kaputte Darstellung auf 375px, Eingaben, die die App zum Absturz bringen.
++5. Schreibe den **Abnahmebericht** in eine Datei: pro Szenario ✅ / ❌ mit einem Satz Begründung, gefundene Probleme mit Schritten zum Nachstellen, Checks, Screenshots.
++6. Entscheidung:
++   - **Alle Szenarien bestanden, keine schweren Probleme** → `factory-report accepted "<1–2 Sätze>" --pr <url> --body-file <bericht>`
++   - **Szenario nicht bestanden oder schweres Problem** → `factory-report rework "<1–2 Sätze>" --body-file <befunde>`. Die Befunde müssen ohne Rückfrage verständlich und nachstellbar sein.
++   - **Letzte Runde** (steht in der ersten Nachricht): keine Rückgabe mehr. Bestanden → `accepted`. Nicht bestanden → `factory-report unresolved "<1–2 Sätze>" --pr <url> --body-file <bericht>`. Dann entscheidet der Mensch. **Nie `accepted` melden, wenn ein Szenario nicht bestanden ist.**
++7. Beenden.
++
++## Wiederaufnahme
++
++Die erste Nachricht sagt dir den **Modus**:
++- **Fortsetzung nach Antwort:** Die Antwort ist verbindlich. Setze die gewählte Option um und nichts darüber hinaus.
++- **Änderungswunsch zum offenen PR / Rückgabe aus der Abnahme:** Auf demselben Branch weiterarbeiten, keinen zweiten PR öffnen.
++- **Erneuter Versuch nach Fehler:** Lies den letzten Fehlerkommentar und den Hinweis des Menschen, mach dort weiter. Vorhandene Sub-Issues und Commits weiterverwenden.
++- Commits auf dem Branch bleiben erhalten. Nie force-pushen.
+diff --git a/workflows/pocock/steps/finish.md b/workflows/pocock/steps/finish.md
+new file mode 100644
+index 0000000..472ba9d
+--- /dev/null
++++ b/workflows/pocock/steps/finish.md
+@@ -0,0 +1,13 @@
++## Abschluss des Bau-Laufs (Factory)
++
++Die Umsetzung ist fertig. Jetzt die Belege, dann die Meldung.
++
++1. `factory-report verifying "Pflicht-Checks und Pull Request"`
++2. Stelle sicher, dass alles committet und `factory/$ISSUE` gepusht ist. Dann `factory-verify` im Repo-Ordner.
++   - Rot: Fehler beheben, committen, pushen, erneut `factory-verify` (höchstens drei Runden). Bleibt es rot: `factory-report failed "<was nicht grün wird und warum>"` und beenden.
++3. Bei sichtbaren Änderungen: App starten (`.factory/setup.json` → `dev`, freier Port, PID merken, danach stoppen) und Screenshots mit `factory-screenshot`.
++4. PR-Text aktualisieren (Skill `pr`: Summary, Evidence, Merge Danger). Ergänze die Checks aus `/work/verify.md`, die Screenshots und eine Zeile „Spec: #$ISSUE“. Behalte `Closes #…` für Spec und Tickets.
++5. PR als bereit markieren: `gh pr ready <url>`.
++6. `factory-report built "<1–2 Sätze, was umgesetzt wurde>" --pr <url>` und beenden.
++
++Der Runner übernimmt `built` nur, wenn `factory-verify` auf genau dem gepushten Commit grün war. Nach jedem weiteren Commit also erneut `factory-verify`.
+diff --git a/workflows/pocock/steps/implement-spec.md b/workflows/pocock/steps/implement-spec.md
+new file mode 100644
+index 0000000..b5f7c8e
+--- /dev/null
++++ b/workflows/pocock/steps/implement-spec.md
+@@ -0,0 +1,13 @@
++## Factory-Modus für /implement-spec (gilt zusätzlich zum Skill)
++
++Du läufst unbeaufsichtigt in der Software Factory. Spec = das Issue oben, Tickets = seine Sub-Issues.
++
++- **Integrations-Branch ist `factory/$ISSUE`.** Er ist bereits ausgecheckt. Lege keinen anderen an. Pushe ihn (`git push -u origin factory/$ISSUE`) nach dem ersten Merge eines Tickets.
++- Öffne dann einen **Entwurfs-PR** von `factory/$ISSUE` gegen `$FACTORY_DEFAULT_BRANCH`. Im PR-Text stehen `Closes #$ISSUE` und je Ticket `Closes #<ticket>`. Schreibe den PR-Text nach dem Skill `pr`.
++- Gibt es schon einen offenen PR für `factory/$ISSUE`, nutze ihn weiter.
++- Arbeite **nur offene Tickets** ab. Bereits erledigte (geschlossene) Tickets nicht erneut umsetzen.
++- Halte dich an `docs/stack.md` und die Stack-Regeln unter `/factory/workflows/starter-kit/stacks/`.
++- **Nie mergen in den Standard-Branch.** Kein `gh pr merge`, kein Auto-Merge. Merges zwischen Ticket-Branches und dem Integrations-Branch sind erlaubt.
++- Den Entwurfs-PR **noch nicht** als bereit markieren. Das macht der Abschluss-Schritt nach den Pflicht-Checks.
++- Schließe Tickets nicht von Hand. Sie schließen sich beim Merge des PRs.
++- Nie im Chat fragen. Bei echter Unklarheit `factory-report question "…" --question "…"` und beenden. Technisch festgefahren: `factory-report failed "…"`.
+diff --git a/workflows/pocock/steps/implement.md b/workflows/pocock/steps/implement.md
+new file mode 100644
+index 0000000..216fa2b
+--- /dev/null
++++ b/workflows/pocock/steps/implement.md
+@@ -0,0 +1,8 @@
++## Factory-Modus für /implement (gilt zusätzlich zum Skill)
++
++Du läufst unbeaufsichtigt in der Software Factory, auf dem Branch `factory/$ISSUE` mit offenem PR. Was zu tun ist, steht oben im Auftrag (Modus) und in den letzten Kommentaren: Befunde aus der Abnahme, ein Änderungswunsch des Menschen oder ein Hinweis nach einem Fehler.
++
++- Setze genau das um, auf demselben Branch, mit `/tdd` wo sinnvoll und `/code-review` zum Schluss.
++- Commit und `git push`. Keinen neuen PR öffnen, nie in den Standard-Branch mergen.
++- Den Text des Spec-Issues nie ändern.
++- Nie im Chat fragen. Bei echter Unklarheit `factory-report question "…" --question "…"` und beenden.
+diff --git a/workflows/pocock/steps/to-tickets.md b/workflows/pocock/steps/to-tickets.md
+new file mode 100644
+index 0000000..cfd3991
+--- /dev/null
++++ b/workflows/pocock/steps/to-tickets.md
+@@ -0,0 +1,12 @@
++## Factory-Modus für /to-tickets (gilt zusätzlich zum Skill)
++
++Du läufst unbeaufsichtigt in der Software Factory. Das Spec-Issue oben ist geprüft und freigegeben.
++
++- **Schritt 4 „Quiz the user“ entfällt.** Es antwortet niemand. Entscheide Schnitt, Größe und Abhängigkeiten selbst nach den Regeln des Skills und veröffentliche direkt.
++- Lege jedes Ticket als **Sub-Issue des Spec-Issues** an (`gh issue create --parent <spec-nummer> …`) und setze die Abhängigkeiten nativ (`--blocked-by`).
++- **Setze an die Tickets kein Label** (auch nicht `factory` oder `ready-for-agent`). Die Factory arbeitet nur das Spec-Issue ab, die Tickets bearbeitet gleich `/implement-spec`.
++- Gibt es bereits Sub-Issues zu diesem Spec-Issue (früherer Lauf), lege keine neuen an. Prüfe nur, ob sie vollständig sind, und ergänze höchstens fehlende.
++- Ändere den Text des Spec-Issues nie.
++- Zum Schluss schreibe die Zerlegung **zur Info** als Kommentar ins Spec-Issue: nummerierte Liste mit Titel, Link zum Sub-Issue, „blockiert durch“ und einem Satz, was das Ticket liefert. Beginne den Kommentar mit `### 🧩 Zerlegung in Tickets`.
++- Kein Code, keine Commits, kein Push in diesem Schritt.
++- Kommst du nicht weiter (z. B. Spec widersprüchlich), melde `factory-report question "…" --question "…"` und beende.
+diff --git a/workflows/pocock/workflow.md b/workflows/pocock/workflow.md
+new file mode 100644
+index 0000000..2d88023
+--- /dev/null
++++ b/workflows/pocock/workflow.md
+@@ -0,0 +1,29 @@
++# Workflow: Matt Pocock
++
++Baut auf den Skills aus [mattpocock/skills](https://github.com/mattpocock/skills) von Matt Pocock auf (MIT-Lizenz). Die Skills sind im Job-Image installiert (fester Commit, siehe `image/Dockerfile`).
++
++## Aufgabenteilung
++
++- **Du (lokal mit Claude Code):** einmal pro Repo `/setup-matt-pocock-skills` (GitHub als Tracker, das Label für `ready-for-agent` heißt `factory`). Pro Feature: `/grill-with-docs` → `/to-spec`. Die Spec landet als GitHub Issue und bekommt automatisch das Label `factory`. Damit übernimmt die Factory.
++- **Factory (auf dem Server, ohne dich):** Prüfung der Spec, `/to-tickets` (Tickets als Sub-Issues), `/implement-spec` (inkl. `/code-review`), Pull Request, unabhängige Abnahme.
++- **Du:** Pull Request prüfen, mergen, danach `/retro` bzw. der Verbesserungs-Lauf der Factory.
++
++## Ablage
++
++- **Spec:** das GitHub Issue selbst (Vorlage aus `/to-spec`: Problem Statement, Solution, User Stories, Implementation Decisions, Testing Decisions, Out of Scope). Die Factory ändert den Issue-Text nie.
++- **Tickets:** Sub-Issues des Spec-Issues mit nativen Abhängigkeiten („blocked by“). Kein Label `factory` an Tickets.
++- **Domänen-Doku:** `GLOSSARY.md` und `docs/adr/` im Repo (entstehen beim Grillen).
++- **Konfiguration für die Skills:** `docs/agents/*.md` im Repo (von `/setup-matt-pocock-skills`).
++- **Stack und Prüfbefehle:** weiterhin `docs/stack.md` und `.factory/setup.json`.
++
++## Zuordnung zu den Factory-Phasen
++
++- **Prüfung** (eigener Lauf, entwickelt nichts): Ist das Issue eine vollständige Spec bzw. ein klarer Bug? Testbar, widerspruchsfrei, im Stack? Bei Freigabe Testszenarien nach `/scenarios/scenarios.md` (außerhalb des Repos).
++- **Bau** (die Factory ruft die Skills nacheinander auf, jeder Schritt mit frischem Kontext):
++  1. Schritt **Architektur** → `/to-tickets` (ohne Rückfrage an den Menschen; Zerlegung als Info-Kommentar ins Spec-Issue)
++  2. Schritt **Umsetzung** → `/implement-spec` auf dem Branch `factory/<nummer>` (Sub-Agents, `/tdd`, `/code-review`), Entwurfs-PR
++  3. Schritt **Tests** → Abschluss: `factory-verify` auf dem gepushten Stand, PR-Text nach `/pr`, Meldung `built`
++- **Abnahme** (eigener Lauf, neuer Agent): Spec-Issue, Akzeptanzkriterien der Tickets und Testszenarien im Browser prüfen. Bestanden → **Review**, sonst zurück in den Bau (max. 2 Runden, danach Review mit „Abnahme nicht bestanden“).
++- **Rückgabe, Änderungswunsch, erneuter Versuch:** `/implement` mit den Befunden auf demselben Branch, dann wieder Abschluss.
++
++Stack-Regeln: `/factory/workflows/starter-kit/stacks/<name>.md` (laut `docs/stack.md`).

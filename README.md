@@ -21,6 +21,8 @@ Bugs gehen auch ohne Spec: Issue mit Label `factory` anlegen und beschreiben, wa
 
 > 🚧 Erste Version, in aktiver Entwicklung.
 
+> 🧩 **Optional: Matt Pococks Workflow.** Die Factory lässt sich mit einem Prompt auf den Entwicklungsworkflow und die Skills von [Matt Pocock](https://github.com/mattpocock/skills) umbauen (`/grill-with-docs` → `/to-spec` lokal, Tickets, Umsetzung und Review auf dem Server). Anleitung: **[docs/pocock-workflow.md](docs/pocock-workflow.md)**
+
 ## So funktioniert es
 
 ```
